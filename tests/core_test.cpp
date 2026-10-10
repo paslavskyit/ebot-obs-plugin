@@ -61,6 +61,12 @@ int main()
 	assert(classify_close(1006) == CloseKind::Retry);
 	assert(classify_close(1000) == CloseKind::Retry);
 
+	// Поганий токен uvicorn відхиляє ще на рукостисканні: HTTP 403, а не WS 4001.
+	assert(classify_handshake(403) == CloseKind::Rejected);
+	assert(classify_handshake(401) == CloseKind::Rejected);
+	assert(classify_handshake(502) == CloseKind::Retry); // деплой Railway
+	assert(classify_handshake(0) == CloseKind::Retry);   // мережа
+
 	std::puts("core_test: ok");
 	return 0;
 }
