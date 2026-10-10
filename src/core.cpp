@@ -13,6 +13,50 @@ bool is_allowed_request(const std::string &request)
 	return OBS_CALL_ALLOWED_REQUESTS.count(request) > 0;
 }
 
+bool is_allowed_profile_param(const std::string &category, const std::string &name)
+{
+	return OBS_PROFILE_PARAMS_ALLOWED.count({category, name}) > 0;
+}
+
+bool is_heavy_request(const std::string &method, const std::string &obs_request)
+{
+	return method == "get_screenshot" || (method == "obs_call" && obs_request == "GetStats");
+}
+
+bool is_safe_verify_url(const std::string &url)
+{
+	// «http://localhost» без двокрапки пропускав би http://localhost@evil.com/…
+	for (const char *prefix : {"https://", "http://localhost:", "http://127.0.0.1:"})
+		if (url.rfind(prefix, 0) == 0)
+			return url.find('@') == std::string::npos;
+	return false;
+}
+
+// base·2^attempt, розкид до +100 % від бази, і все — не вище стелі.
+static int backoff_ms(int attempt, double jitter, int first, int cap)
+{
+	attempt = std::clamp(attempt, 0, 20);
+	double base = std::min(double(cap), double(first) * std::pow(2.0, attempt));
+	double with_jitter = base * (1.0 + std::clamp(jitter, 0.0, 1.0));
+	return int(std::min(double(cap), with_jitter));
+}
+
+int reconnect_delay_ms(int attempt, double jitter)
+{
+	return backoff_ms(attempt, jitter, RECONNECT_FIRST_MS, RECONNECT_MAX_MS);
+}
+
+int rejected_retry_delay_ms(int attempt, double jitter)
+{
+	return backoff_ms(attempt, jitter, REJECTED_RETRY_FIRST_MS, REJECTED_RETRY_MAX_MS);
+}
+
+std::string obs_error_text(const std::string &request, unsigned int code, const std::string &comment)
+{
+	std::string text = "Request " + request + " returned code " + std::to_string(code);
+	return comment.empty() ? text : text + ". With message: " + comment;
+}
+
 std::pair<int, int> clamp_screenshot_size(long long width, long long height)
 {
 	long long w = width, h = height;

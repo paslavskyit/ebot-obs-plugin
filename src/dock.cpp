@@ -1,5 +1,5 @@
 // Док «єБот»: стан, «Підключити канал», код, «Відкрити кабінет», «Від'єднати».
-// Стан читається таймером раз на 0,5 с — жодних сигналів між потоками.
+// Стан читається таймером раз на 0,5 с і одразу після кожного кліку.
 #include "dock.hpp"
 #include "config.hpp"
 #include "pairing.hpp"
@@ -65,18 +65,10 @@ void create_dock()
 		layout->addWidget(w);
 	layout->addStretch();
 
-	QObject::connect(connect_btn, &QPushButton::clicked, [] { pair_begin(); });
-	QObject::connect(cancel_btn, &QPushButton::clicked, [] { pair_cancel(); });
-	QObject::connect(cabinet_btn, &QPushButton::clicked,
-			 [] { QDesktopServices::openUrl(QUrl("https://ebot.live/widgets?tab=obs")); });
-	QObject::connect(disconnect_btn, &QPushButton::clicked, [] {
-		clear_config();
-		set_channel_name("");
-		relay().set_token("");
-	});
-
-	auto *timer = new QTimer(root);
-	QObject::connect(timer, &QTimer::timeout, root, [=] {
+	// Одна функція оновлення: таймер підхоплює зміни з інших потоків, а клік
+	// оновлює док одразу — інакше кнопка «Підключити канал» лишалась на
+	// пів секунди, і подвійний клік відкривав дві прив'язки.
+	auto refresh = [=] {
 		PairStatus pair = pair_status();
 		LinkState state = relay().state();
 		bool linked = state != LinkState::NoToken;
@@ -88,10 +80,31 @@ void create_dock()
 		cancel_btn->setVisible(pair.active);
 		cabinet_btn->setVisible(linked && !pair.active);
 		disconnect_btn->setVisible(linked && !pair.active);
-		std::string url = update_url();
-		update->setVisible(!url.empty());
-		update->setText(QString("<a href=\"%1\">%2</a>").arg(QString::fromStdString(url), t("Update.Available")));
+		QString url = QString::fromStdString(update_url());
+		update->setVisible(!url.isEmpty());
+		update->setText(QString("<a href=\"%1\">%2</a>").arg(url.toHtmlEscaped(), t("Update.Available")));
+	};
+
+	QObject::connect(connect_btn, &QPushButton::clicked, [=] {
+		pair_begin();
+		refresh();
 	});
+	QObject::connect(cancel_btn, &QPushButton::clicked, [=] {
+		pair_cancel();
+		refresh();
+	});
+	QObject::connect(cabinet_btn, &QPushButton::clicked,
+			 [] { QDesktopServices::openUrl(QUrl("https://ebot.live/widgets?tab=obs")); });
+	QObject::connect(disconnect_btn, &QPushButton::clicked, [=] {
+		clear_config();
+		set_channel_name("");
+		relay().set_token("");
+		refresh();
+	});
+
+	auto *timer = new QTimer(root);
+	QObject::connect(timer, &QTimer::timeout, root, refresh);
+	refresh(); // без цього на старті на мить блимали всі кнопки разом
 	timer->start(500);
 
 	obs_frontend_add_dock_by_id("ebot-dock", obs_module_text("Dock.Title"), root);
