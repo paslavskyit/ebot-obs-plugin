@@ -53,6 +53,9 @@ double peak_to_db(const float *peaks, int channels);
 enum class CloseKind { Retry, Rejected };
 // Код закриття WS від сервера: 4001 = relay-токен не прийнято.
 CloseKind classify_close(unsigned short code);
+// HTTP-статус невдалого рукостискання WS: 401/403 = токен не прийнято (uvicorn
+// відхиляє поганий токен ще до accept), решта — мережа чи деплой, пробуємо ще.
+CloseKind classify_handshake(unsigned long http_status);
 
 struct MicLevel {
 	size_t samples = 0;

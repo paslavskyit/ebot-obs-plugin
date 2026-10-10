@@ -106,6 +106,11 @@ CloseKind classify_close(unsigned short code)
 	return code == 4001 ? CloseKind::Rejected : CloseKind::Retry;
 }
 
+CloseKind classify_handshake(unsigned long http_status)
+{
+	return (http_status == 401 || http_status == 403) ? CloseKind::Rejected : CloseKind::Retry;
+}
+
 void MicPeaks::add(const std::string &input, double now, double peak_db)
 {
 	std::lock_guard<std::mutex> lock(mutex_);

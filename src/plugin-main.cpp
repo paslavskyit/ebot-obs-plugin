@@ -18,7 +18,12 @@ static void on_frontend(enum obs_frontend_event event, void *)
 		ebot::relay().push_scene(ebot::current_scene_name());
 		break;
 	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING:
+		ebot::bridge_shutdown();
+		break;
 	case OBS_FRONTEND_EVENT_EXIT:
+		// Поки UI ще живий: запит, що вже йде (set_scene → UI-потік), доробиться,
+		// а join в obs_module_unload не чекатиме на заблокований UI.
+		ebot::relay().request_stop();
 		ebot::bridge_shutdown();
 		break;
 	default:

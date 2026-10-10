@@ -36,7 +36,7 @@ void RelayClient::start()
 	thread_ = std::thread([this] { run(); });
 }
 
-void RelayClient::stop()
+void RelayClient::request_stop()
 {
 	stop_ = true;
 	{
@@ -45,8 +45,22 @@ void RelayClient::stop()
 			current_->abort();
 	}
 	cv_.notify_all();
+}
+
+void RelayClient::stop()
+{
+	request_stop();
+	http_abort_all(); // бекап, що качається, обривається одразу, а не за 120 с
 	if (thread_.joinable())
 		thread_.join();
+	std::vector<std::thread> backups;
+	{
+		std::lock_guard<std::mutex> lock(backups_mutex_);
+		backups.swap(backups_);
+	}
+	for (auto &t : backups)
+		if (t.joinable())
+			t.join();
 }
 
 void RelayClient::set_token(std::string token)
@@ -81,8 +95,14 @@ void RelayClient::run()
 			queue_.clear();
 		}
 		state_ = LinkState::Connecting;
-		if (ws.open(server_base(), "/api/ws/obs-relay?token=" + token))
+		unsigned long http_status = 0;
+		if (ws.open(server_base(), "/api/ws/obs-relay?token=" + token, http_status)) {
 			serve(ws);
+		} else if (!stop_) {
+			obs_log(LOG_WARNING, "eBot handshake failed (HTTP %lu)", http_status);
+			if (classify_handshake(http_status) == CloseKind::Rejected)
+				state_ = LinkState::Rejected; // перевипущений токен: чекаємо нової прив'язки
+		}
 		{
 			std::lock_guard<std::mutex> lock(mutex_);
 			current_ = nullptr;
@@ -228,7 +248,27 @@ static std::string do_backup(const std::string &trigger, const std::string &kind
 	localtime_s(&local, &t);
 	fs::path dir = backup_dir();
 	std::string filename = backup_filename(trigger.empty() ? "manual" : trigger, local);
-	std::ofstream(dir / filename, std::ios::binary).write(resp.body.data(), (std::streamsize)resp.body.size());
+	// Спершу .part, перейменування — лише після повного запису: обірваний чи
+	// недописаний файл не лягає поруч із справжніми архівами як «успіх».
+	fs::path part = dir / (filename + ".part");
+	{
+		std::ofstream out(part, std::ios::binary);
+		out.write(resp.body.data(), (std::streamsize)resp.body.size());
+		out.close();
+		if (!out.good()) {
+			std::error_code ec;
+			fs::remove(part, ec);
+			throw std::runtime_error("Не вдалося записати архів у «Документи/єБот/backups»");
+		}
+	}
+	std::error_code ec;
+	if (fs::file_size(part, ec) != resp.body.size() || ec) {
+		fs::remove(part, ec);
+		throw std::runtime_error("Архів записався не повністю");
+	}
+	fs::rename(part, dir / filename, ec);
+	if (ec)
+		throw std::runtime_error("Не вдалося зберегти архів: " + ec.message());
 	int removed = prune_backups(dir);
 	obs_log(LOG_INFO, "backup saved: %s (%zu bytes), pruned %d", filename.c_str(), resp.body.size(), removed);
 	return "{\"success\":true,\"filename\":" + json_quote(filename) +
@@ -259,7 +299,6 @@ void RelayClient::handle(const std::string &raw)
 
 	if (method == "do_backup") {
 		// Довгий (до 120 с) — окремим потоком, щоб не тримати інші команди.
-		// ponytail: detach — бекап після виходу OBS просто губиться; join, якщо почне заважати.
 		std::string trigger = obs_data_get_string(params, "trigger");
 		std::string kinds = obs_data_get_string(params, "kinds");
 		std::string token;
@@ -267,15 +306,18 @@ void RelayClient::handle(const std::string &raw)
 			std::lock_guard<std::mutex> lock(mutex_);
 			token = token_;
 		}
-		std::thread([this, id, trigger, kinds, token] {
+		std::lock_guard<std::mutex> lock(backups_mutex_);
+		backups_.emplace_back([this, id, trigger, kinds, token] {
 			try {
 				enqueue(reply_ok(id, do_backup(trigger, kinds, token)));
 			} catch (const std::exception &e) {
 				enqueue(reply_error(id, e.what()));
 			}
-		}).detach();
+		});
 		return;
 	}
+	if (stop_)
+		return; // OBS закривається: не смикаємо UI-потік запитами
 	try {
 		enqueue(reply_ok(id, dispatch(method, params)));
 	} catch (const std::exception &e) {

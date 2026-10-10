@@ -3,8 +3,40 @@
 #include <windows.h>
 #include <winhttp.h>
 #include <cstdlib>
+#include <mutex>
+#include <set>
 
 namespace ebot {
+
+static std::mutex g_inflight_mutex;
+static std::set<HINTERNET> g_inflight;
+static bool g_http_closed = false;
+
+// true — запит зареєстровано; false — HTTP уже закрито, запит треба кинути.
+static bool track(HINTERNET request)
+{
+	std::lock_guard<std::mutex> lock(g_inflight_mutex);
+	if (g_http_closed)
+		return false;
+	g_inflight.insert(request);
+	return true;
+}
+
+// true — хендл ще наш і закрити його треба тут (інакше його вже закрив http_abort_all).
+static bool untrack(HINTERNET request)
+{
+	std::lock_guard<std::mutex> lock(g_inflight_mutex);
+	return g_inflight.erase(request) == 1;
+}
+
+void http_abort_all()
+{
+	std::lock_guard<std::mutex> lock(g_inflight_mutex);
+	g_http_closed = true;
+	for (HINTERNET request : g_inflight)
+		WinHttpCloseHandle(request);
+	g_inflight.clear();
+}
 
 std::wstring widen(const std::string &text)
 {
@@ -69,7 +101,8 @@ HttpResponse http_request(const std::string &base, const wchar_t *method, const 
 							 WINHTTP_DEFAULT_ACCEPT_TYPES,
 							 parts.secure ? WINHTTP_FLAG_SECURE : 0)
 				    : nullptr;
-	if (request) {
+	bool tracked = request && track(request);
+	if (tracked) {
 		int t = (int)timeout_ms;
 		WinHttpSetTimeouts(request, t, t, t, t);
 		const wchar_t *headers = json_body.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS
@@ -82,14 +115,25 @@ HttpResponse http_request(const std::string &base, const wchar_t *method, const 
 			DWORD status = 0, size = sizeof(status);
 			WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
 					    WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX);
+			DWORD expected = 0, len_size = sizeof(expected);
+			BOOL has_length = WinHttpQueryHeaders(request, WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
+							      WINHTTP_HEADER_NAME_BY_INDEX, &expected, &len_size,
+							      WINHTTP_NO_HEADER_INDEX);
 			char buf[16384];
 			DWORD read = 0;
-			while (WinHttpReadData(request, buf, sizeof buf, &read) && read > 0)
+			BOOL read_ok = TRUE;
+			for (;;) {
+				read_ok = WinHttpReadData(request, buf, sizeof buf, &read);
+				if (!read_ok || read == 0)
+					break;
 				result.body.append(buf, read);
-			result.status = status;
+			}
+			// Обірване посеред тіла — збій, а не «200 з половиною архіву».
+			bool complete = read_ok && (!has_length || result.body.size() == expected);
+			result.status = complete ? status : 0;
 		}
 	}
-	if (request)
+	if (request && (!tracked || untrack(request)))
 		WinHttpCloseHandle(request);
 	if (connect)
 		WinHttpCloseHandle(connect);

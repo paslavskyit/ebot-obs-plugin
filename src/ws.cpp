@@ -14,8 +14,9 @@ WsConnection::~WsConnection()
 		WinHttpCloseHandle(session_);
 }
 
-bool WsConnection::open(const std::string &base, const std::string &path_and_query)
+bool WsConnection::open(const std::string &base, const std::string &path_and_query, unsigned long &http_status)
 {
+	http_status = 0;
 	ServerParts parts;
 	if (aborted_ || !parse_base(base, parts))
 		return false;
@@ -45,6 +46,7 @@ bool WsConnection::open(const std::string &base, const std::string &path_and_que
 	if (ok)
 		WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
 				    WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX);
+	http_status = status;
 	HINTERNET socket = (ok && status == 101) ? WinHttpWebSocketCompleteUpgrade(request, 0) : nullptr;
 	// Якщо abort() уже закрив запит — він же його і звільнив.
 	if (pending_.exchange(nullptr) == request)
