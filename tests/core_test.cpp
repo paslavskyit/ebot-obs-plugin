@@ -56,6 +56,11 @@ int main()
 	assert(peaks.read("Mic", 135.0).samples == 1); // перший вийшов за 30 с
 	assert(peaks.read("Other", 115.0).samples == 0);
 
+	// 4001 — сервер не прийняв токен (перевипущено в кабінеті): не довбати сервер.
+	assert(classify_close(4001) == CloseKind::Rejected);
+	assert(classify_close(1006) == CloseKind::Retry);
+	assert(classify_close(1000) == CloseKind::Retry);
+
 	std::puts("core_test: ok");
 	return 0;
 }
