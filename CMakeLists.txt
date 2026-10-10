@@ -34,7 +34,7 @@ if(ENABLE_QT)
   )
 endif()
 
-target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/plugin-main.cpp src/core.cpp src/obs_bridge.cpp)
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/plugin-main.cpp src/core.cpp src/obs_bridge.cpp src/http.cpp src/config.cpp)
 
 if(WIN32)
   target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE winhttp crypt32 shell32)
