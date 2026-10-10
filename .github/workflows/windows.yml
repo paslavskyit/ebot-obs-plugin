@@ -1,0 +1,20 @@
+name: windows
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+jobs:
+  build:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: .github/scripts/Build-Windows.ps1 -Target x64 -Configuration RelWithDebInfo
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ebot-obs-windows
+          path: release/
