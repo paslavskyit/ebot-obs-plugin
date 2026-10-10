@@ -18,3 +18,8 @@ jobs:
         with:
           name: ebot-obs-windows
           path: release/
+  core-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: g++ -std=c++17 -Wall -Isrc tests/core_test.cpp src/core.cpp -o core_test && ./core_test
