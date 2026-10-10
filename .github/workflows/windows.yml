@@ -7,6 +7,8 @@ on:
 jobs:
   build:
     runs-on: windows-2022
+    permissions:
+      contents: write
     defaults:
       run:
         shell: pwsh
@@ -14,10 +16,36 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build
         run: .github/scripts/Build-Windows.ps1 -Target x64 -Configuration RelWithDebInfo
+      - name: Stage (ProgramData layout)
+        run: |
+          $dll = Get-ChildItem release -Recurse -Filter ebot-obs.dll | Select-Object -First 1
+          $locale = Get-ChildItem release -Recurse -Directory -Filter locale | Select-Object -First 1
+          if (-not $dll -or -not $locale) { Get-ChildItem release -Recurse | Select-Object FullName; throw "no dll/locale in release/" }
+          New-Item -ItemType Directory -Force stage/ebot-obs/bin/64bit, stage/ebot-obs/data | Out-Null
+          Copy-Item $dll.FullName stage/ebot-obs/bin/64bit/
+          Copy-Item $locale.FullName stage/ebot-obs/data/ -Recurse
+          Compress-Archive stage/ebot-obs ebot-obs-windows.zip -Force
+      - name: Installer
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+          $version = (Get-Content buildspec.json -Raw | ConvertFrom-Json).version
+          & $iscc "/DAppVersion=$version" installer/ebot-obs.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+          @{ version = $version; url = "https://github.com/${{ github.repository }}/releases/latest/download/ebot-obs-setup.exe" } |
+            ConvertTo-Json | Set-Content -Encoding utf8 latest.json
       - uses: actions/upload-artifact@v4
         with:
-          name: ebot-obs-windows
-          path: release/
+          name: ebot-obs-setup
+          path: |
+            dist/ebot-obs-setup.exe
+            ebot-obs-windows.zip
+            latest.json
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/ebot-obs-setup.exe ebot-obs-windows.zip latest.json --title "${{ github.ref_name }}" --notes "єБот для OBS ${{ github.ref_name }}"
   core-test:
     runs-on: ubuntu-latest
     steps:
