@@ -1,0 +1,32 @@
+; Інсталятор плагіна «єБот для OBS»: кладе плагін у ProgramData — OBS 28+
+; сам підхоплює плагіни звідти. Збирає CI (.github/workflows/windows.yml).
+#ifndef AppVersion
+  #define AppVersion "0.0.0"
+#endif
+
+[Setup]
+AppId={{4E9B1F7A-2C51-4D7E-9A3B-8F0C6D2E1B44}
+AppName=єБот для OBS
+AppVersion={#AppVersion}
+AppPublisher=єБот
+AppPublisherURL=https://ebot.live
+DefaultDirName={commonappdata}\obs-studio\plugins\ebot-obs
+DisableDirPage=yes
+DisableProgramGroupPage=yes
+PrivilegesRequired=admin
+CloseApplications=yes
+OutputDir=..\dist
+OutputBaseFilename=ebot-obs-setup
+Compression=lzma2
+SolidCompression=yes
+WizardStyle=modern
+UninstallDisplayName=єБот для OBS
+
+[Languages]
+Name: "uk"; MessagesFile: "compiler:Languages\Ukrainian.isl"
+
+[Files]
+Source: "..\stage\ebot-obs\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
+
+[Messages]
+uk.FinishedLabel=Готово. Відкрийте OBS: у меню «Доки» з'явиться «єБот» — натисніть там «Підключити канал».
