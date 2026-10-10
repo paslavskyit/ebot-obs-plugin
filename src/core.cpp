@@ -101,6 +101,11 @@ double peak_to_db(const float *peaks, int channels)
 	return best;
 }
 
+CloseKind classify_close(unsigned short code)
+{
+	return code == 4001 ? CloseKind::Rejected : CloseKind::Retry;
+}
+
 void MicPeaks::add(const std::string &input, double now, double peak_db)
 {
 	std::lock_guard<std::mutex> lock(mutex_);

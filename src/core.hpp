@@ -50,6 +50,10 @@ bool is_safe_token(const std::string &token);
 std::string json_quote(const std::string &text);
 double peak_to_db(const float *peaks, int channels);
 
+enum class CloseKind { Retry, Rejected };
+// Код закриття WS від сервера: 4001 = relay-токен не прийнято.
+CloseKind classify_close(unsigned short code);
+
 struct MicLevel {
 	size_t samples = 0;
 	double peak_db = MIC_PEAK_FLOOR_DB;
