@@ -20,6 +20,7 @@
 #include <QPalette>
 #include <QPointer>
 #include <QPushButton>
+#include <QStyle>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -177,21 +178,27 @@ void create_dock()
 	note->setVisible(false);
 
 	// Прив'язаний канал: одна компактна смуга — пульту нижче потрібне місце.
-	// Оновити й від'єднати — квадратні іконки з підказкою; гліф бере колір тексту
-	// теми OBS (стандартні піктограми Qt на темних темах губились).
+	// Оновити й від'єднати — квадратні кнопки з іконками самої теми OBS (класи
+	// icon-refresh / icon-close: тема малює їх сама, світла й темна). Гліфи
+	// шрифту (↻ ✕) тема не мала — кнопки були порожні (11.10.2026). Тема без
+	// цих класів — стандартна іконка Qt.
 	auto *linked_row = new QWidget();
 	auto *row = new QHBoxLayout(linked_row);
 	row->setContentsMargins(0, 0, 0, 0);
-	auto icon_button = [](const char *glyph, const char *tip_key) {
-		auto *b = new QPushButton(QString::fromUtf8(glyph));
+	auto icon_button = [](const char *obs_class, QStyle::StandardPixmap fallback, const char *tip_key) {
+		auto *b = new QPushButton();
+		b->setProperty("class", obs_class);
 		b->setToolTip(t(tip_key));
 		b->setAccessibleName(t(tip_key));
+		b->ensurePolished();
+		if (b->icon().isNull())
+			b->setIcon(b->style()->standardIcon(fallback));
 		b->setFixedWidth(b->sizeHint().height());
 		return b;
 	};
 	auto *cabinet_btn = new QPushButton(t("Button.Cabinet"));
-	auto *refresh_btn = icon_button("↻", "Button.RefreshDock");
-	auto *disconnect_btn = icon_button("✕", "Button.Disconnect");
+	auto *refresh_btn = icon_button("icon-refresh", QStyle::SP_BrowserReload, "Button.RefreshDock");
+	auto *disconnect_btn = icon_button("icon-close", QStyle::SP_DialogCloseButton, "Button.Disconnect");
 	row->addWidget(cabinet_btn, 1);
 	row->addWidget(refresh_btn);
 	row->addWidget(disconnect_btn);
