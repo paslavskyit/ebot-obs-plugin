@@ -86,6 +86,15 @@ CloseKind classify_close(unsigned short code);
 // відхиляє поганий токен ще до accept), решта — мережа чи деплой, пробуємо ще.
 CloseKind classify_handshake(unsigned long http_status);
 
+// Пульт у доці: кольори поточної теми OBS для сторінки /dock. Ключі — ті самі,
+// що OBS_DOCK_THEME_KEYS сервера; сервер (і сторінка) приймають лише #rrggbb.
+struct DockTheme {
+	std::string bg, panel, fg, muted, border, accent;
+};
+std::string hex_color(int r, int g, int b);
+// /api/obs/dock/enter?code=…&bg=%23rrggbb… — невалідні кольори просто не йдуть.
+std::string dock_enter_path(const std::string &code, const DockTheme &theme);
+
 struct MicLevel {
 	size_t samples = 0;
 	double peak_db = MIC_PEAK_FLOOR_DB;

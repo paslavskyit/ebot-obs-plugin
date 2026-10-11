@@ -1,20 +1,44 @@
-// Док «єБот»: стан, «Підключити канал», код, «Відкрити кабінет», «Від'єднати».
-// Стан читається таймером раз на 0,5 с і одразу після кожного кліку.
+// Док «єБот»: зверху — стан і кнопки (прив'язка, «Оновити пульт», кабінет,
+// від'єднати), нижче — пульт: сторінка /dock сайту у вбудованому браузері OBS
+// (obs-browser). Стан читається таймером раз на 0,5 с і одразу після кожного кліку.
 #include "dock.hpp"
+#include "browser-panel.hpp"
 #include "config.hpp"
+#include "core.hpp"
+#include "http.hpp"
 #include "pairing.hpp"
 #include "relay_client.hpp"
 #include <obs-frontend-api.h>
 #include <obs-module.h>
+#include <plugin-support.h>
+#include <QApplication>
 #include <QDesktopServices>
+#include <QHBoxLayout>
 #include <QLabel>
+#include <QMetaObject>
+#include <QPalette>
+#include <QPointer>
 #include <QPushButton>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <thread>
 
 namespace ebot {
+
+// QCef живе весь час роботи OBS; віджет браузера — дитина дока (його знищить OBS).
+static QCef *g_cef = nullptr;
+static QCefCookieManager *g_cookies = nullptr;
+static QPointer<QCefWidget> g_browser;
+static QPointer<QVBoxLayout> g_layout;
+static QPointer<QWidget> g_root;
+static QPointer<QLabel> g_note;
+static int g_load_gen = 0;           // лише UI-потік
+static bool g_frontend_ready = false; // FINISHED_LOADING: можна піднімати CEF
+static bool g_no_browser = false;     // OBS без obs-browser — пульту нема де жити
+static bool g_loaded = false;         // пульт відкрито для поточного токена
+static bool g_load_failed = false;    // код не отримали — спробуємо, щойно релей підключиться
 
 static QString t(const char *key)
 {
@@ -38,6 +62,96 @@ static QString state_text(LinkState state)
 	}
 }
 
+// Кольори поточної теми OBS: пульт малюється ними й не вирізняється серед доків.
+static DockTheme current_theme()
+{
+	QPalette p = QApplication::palette();
+	auto hex = [&p](QPalette::ColorRole role) {
+		QColor c = p.color(role);
+		return hex_color(c.red(), c.green(), c.blue());
+	};
+	return {hex(QPalette::Window), hex(QPalette::Button),          hex(QPalette::WindowText),
+		hex(QPalette::PlaceholderText), hex(QPalette::Mid), hex(QPalette::Highlight)};
+}
+
+static void show_note(const QString &text)
+{
+	if (!g_note)
+		return;
+	g_note->setText(text);
+	g_note->setVisible(!text.isEmpty());
+}
+
+// Браузер — лише після FINISHED_LOADING: CEF піднімає obs-browser, і чекати на
+// нього в post_load означало б затримати старт OBS.
+static bool ensure_browser()
+{
+	if (g_browser)
+		return true;
+	if (!g_frontend_ready || !g_root || !g_layout || g_no_browser)
+		return false;
+	if (!g_cef) {
+		g_cef = obs_browser_init_panel();
+		if (!g_cef || obs_browser_qcef_version() < 1) {
+			g_cef = nullptr;
+			g_no_browser = true;
+			show_note(t("Dock.NoBrowser"));
+			obs_log(LOG_WARNING, "obs-browser is unavailable: the dock stays without the control panel");
+			return false;
+		}
+		g_cef->init_browser();
+		g_cef->wait_for_browser_init();
+		// Своє сховище cookies: сесія пульта не змішується з іншими браузерними
+		// доками й не чіпає вхід у кабінет у звичайному браузері.
+		g_cookies = g_cef->create_cookie_manager("ebot_dock", true);
+	}
+	g_browser = g_cef->create_widget(g_root, "about:blank", g_cookies);
+	g_layout->addWidget(g_browser, 1);
+	return true;
+}
+
+// Кожне відкриття — новий одноразовий код: сервер не пускає код двічі.
+static void load_panel()
+{
+	if (!ensure_browser())
+		return;
+	int gen = ++g_load_gen;
+	DockTheme theme = current_theme(); // палітра — лише з UI-потоку
+	g_loaded = true;
+	g_load_failed = false;
+	show_note(t("Dock.Opening"));
+	std::thread([gen, theme] {
+		std::string code = dock_handoff_code();
+		QMetaObject::invokeMethod(
+			QCoreApplication::instance(),
+			[gen, theme, code] {
+				if (gen != g_load_gen || !g_browser)
+					return;
+				if (code.empty()) {
+					g_load_failed = true;
+					show_note(t("Dock.Failed"));
+					return;
+				}
+				show_note("");
+				g_browser->setURL(server_base() + dock_enter_path(code, theme));
+			},
+			Qt::QueuedConnection);
+	}).detach();
+}
+
+// «Від'єднати» — пульт закривається і його сесія стирається з цього сховища.
+static void unload_panel()
+{
+	g_loaded = false;
+	g_load_failed = false;
+	++g_load_gen;
+	if (g_browser)
+		g_browser->setURL("about:blank");
+	if (g_cookies)
+		g_cookies->DeleteCookies("", "");
+	show_note("");
+}
+
 void create_dock()
 {
 	auto *root = new QWidget();
@@ -54,16 +168,33 @@ void create_dock()
 	hint->setWordWrap(true);
 	auto *connect_btn = new QPushButton(t("Button.Connect"));
 	auto *cancel_btn = new QPushButton(t("Button.Cancel"));
-	auto *cabinet_btn = new QPushButton(t("Button.Cabinet"));
-	auto *disconnect_btn = new QPushButton(t("Button.Disconnect"));
 	auto *update = new QLabel();
 	update->setOpenExternalLinks(true);
+	auto *note = new QLabel();
+	note->setWordWrap(true);
+	note->setVisible(false);
+
+	// Прив'язаний канал: одна компактна смуга — пульту нижче потрібне місце.
+	auto *linked_row = new QWidget();
+	auto *row = new QHBoxLayout(linked_row);
+	row->setContentsMargins(0, 0, 0, 0);
+	auto *refresh_btn = new QPushButton(t("Button.RefreshDock"));
+	auto *cabinet_btn = new QPushButton(t("Button.Cabinet"));
+	auto *disconnect_btn = new QPushButton(t("Button.Disconnect"));
+	for (QPushButton *b : {refresh_btn, cabinet_btn, disconnect_btn})
+		row->addWidget(b);
+
 	for (QWidget *w : {static_cast<QWidget *>(status), static_cast<QWidget *>(code), static_cast<QWidget *>(hint),
-			   static_cast<QWidget *>(connect_btn), static_cast<QWidget *>(cancel_btn),
-			   static_cast<QWidget *>(cabinet_btn), static_cast<QWidget *>(disconnect_btn),
-			   static_cast<QWidget *>(update)})
+			   static_cast<QWidget *>(connect_btn), static_cast<QWidget *>(cancel_btn), linked_row,
+			   static_cast<QWidget *>(update), static_cast<QWidget *>(note)})
 		layout->addWidget(w);
-	layout->addStretch();
+	// Поки пульту нема (не прив'язано, OBS без браузера) — кнопки притиснуті догори.
+	auto *filler = new QWidget();
+	layout->addWidget(filler, 1);
+
+	g_root = root;
+	g_layout = layout;
+	g_note = note;
 
 	// Одна функція оновлення: таймер підхоплює зміни з інших потоків, а клік
 	// оновлює док одразу — інакше кнопка «Підключити канал» лишалась на
@@ -78,11 +209,20 @@ void create_dock()
 		hint->setVisible(!pair.user_code.empty());
 		connect_btn->setVisible(!pair.active && (!linked || state == LinkState::Rejected));
 		cancel_btn->setVisible(pair.active);
-		cabinet_btn->setVisible(linked && !pair.active);
-		disconnect_btn->setVisible(linked && !pair.active);
+		linked_row->setVisible(linked && !pair.active);
+		refresh_btn->setVisible(!g_no_browser);
 		QString url = QString::fromStdString(update_url());
 		update->setVisible(!url.isEmpty());
 		update->setText(QString("<a href=\"%1\">%2</a>").arg(url.toHtmlEscaped(), t("Update.Available")));
+
+		if (linked && g_frontend_ready && (!g_loaded || (g_load_failed && state == LinkState::Connected)))
+			load_panel();
+		else if (!linked && g_loaded)
+			unload_panel();
+		bool panel = linked && g_browser;
+		if (g_browser)
+			g_browser->setVisible(panel);
+		filler->setVisible(!panel);
 	};
 
 	QObject::connect(connect_btn, &QPushButton::clicked, [=] {
@@ -93,6 +233,7 @@ void create_dock()
 		pair_cancel();
 		refresh();
 	});
+	QObject::connect(refresh_btn, &QPushButton::clicked, [] { load_panel(); });
 	QObject::connect(cabinet_btn, &QPushButton::clicked,
 			 [] { QDesktopServices::openUrl(QUrl("https://ebot.live/widgets?tab=obs")); });
 	QObject::connect(disconnect_btn, &QPushButton::clicked, [=] {
@@ -108,6 +249,25 @@ void create_dock()
 	timer->start(500);
 
 	obs_frontend_add_dock_by_id("ebot-dock", obs_module_text("Dock.Title"), root);
+}
+
+void dock_frontend_ready()
+{
+	g_frontend_ready = true; // таймер дока сам відкриє пульт, якщо канал прив'язано
+}
+
+void dock_theme_changed()
+{
+	if (g_loaded)
+		load_panel();
+}
+
+void dock_shutdown()
+{
+	// CEF треба закрити до виходу OBS, інакше він падає на знищенні віджета.
+	++g_load_gen;
+	if (g_browser)
+		g_browser->closeBrowser();
 }
 
 } // namespace ebot
