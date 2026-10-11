@@ -24,7 +24,14 @@ static void on_frontend(enum obs_frontend_event event, void *)
 	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING:
 		ebot::bridge_shutdown();
 		break;
+	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
+		ebot::dock_frontend_ready();
+		break;
+	case OBS_FRONTEND_EVENT_THEME_CHANGED:
+		ebot::dock_theme_changed();
+		break;
 	case OBS_FRONTEND_EVENT_EXIT:
+		ebot::dock_shutdown();
 		// request_stop не блокує; на вихід obs-websocket уже не обслуговує нових
 		// запитів (SCRIPTING_SHUTDOWN раніше за EXIT), а запит, що йде, доробиться,
 		// поки UI ще обробляє події — join в obs_module_unload не зависне.

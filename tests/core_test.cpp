@@ -109,6 +109,17 @@ int main()
 	assert(!is_safe_verify_url("file:///C:/Windows/system32/calc.exe"));
 	assert(!is_safe_verify_url("http://ebot.live/"));
 
+	// Пульт у доці: адреса входу з кольорами теми OBS (сервер приймає лише #rrggbb).
+	assert(hex_color(30, 31, 36) == "#1e1f24");
+	assert(hex_color(-5, 300, 255) == "#00ffff");
+	DockTheme theme{"#1e1f24", "#26282e", "#d6d8dc", "#9aa0a8", "#33363e", "#3d68d8"};
+	assert(dock_enter_path("abc_-9", theme) ==
+	       "/api/obs/dock/enter?code=abc_-9&bg=%231e1f24&panel=%2326282e&fg=%23d6d8dc"
+	       "&muted=%239aa0a8&border=%2333363e&accent=%233d68d8");
+	DockTheme partial{"#000000", "red;}", "", "#ABCDEF", "#12345", "#123456"};
+	assert(dock_enter_path("c", partial) == "/api/obs/dock/enter?code=c&bg=%23000000&muted=%23ABCDEF&accent=%23123456");
+	assert(dock_enter_path("a b&c", DockTheme{}) == "/api/obs/dock/enter?code=a%20b%26c");
+
 	std::puts("core_test: ok");
 	return 0;
 }

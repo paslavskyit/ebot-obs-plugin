@@ -155,6 +155,49 @@ CloseKind classify_handshake(unsigned long http_status)
 	return (http_status == 401 || http_status == 403) ? CloseKind::Rejected : CloseKind::Retry;
 }
 
+std::string hex_color(int r, int g, int b)
+{
+	char out[8];
+	std::snprintf(out, sizeof(out), "#%02x%02x%02x", std::clamp(r, 0, 255), std::clamp(g, 0, 255),
+		      std::clamp(b, 0, 255));
+	return out;
+}
+
+static std::string url_encode(const std::string &text)
+{
+	static const char *hex = "0123456789ABCDEF";
+	std::string out;
+	for (unsigned char c : text) {
+		if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+			out += static_cast<char>(c);
+		} else {
+			out += '%';
+			out += hex[c >> 4];
+			out += hex[c & 15];
+		}
+	}
+	return out;
+}
+
+static bool is_hex_color(const std::string &value)
+{
+	return value.size() == 7 && value[0] == '#' &&
+	       std::all_of(value.begin() + 1, value.end(), [](unsigned char c) { return std::isxdigit(c); });
+}
+
+std::string dock_enter_path(const std::string &code, const DockTheme &theme)
+{
+	std::string path = "/api/obs/dock/enter?code=" + url_encode(code);
+	const std::pair<const char *, const std::string *> colors[] = {
+		{"bg", &theme.bg},         {"panel", &theme.panel},   {"fg", &theme.fg},
+		{"muted", &theme.muted},   {"border", &theme.border}, {"accent", &theme.accent},
+	};
+	for (const auto &[key, value] : colors)
+		if (is_hex_color(*value))
+			path += std::string("&") + key + "=" + url_encode(*value);
+	return path;
+}
+
 void MicPeaks::add(const std::string &input, double now, double peak_db)
 {
 	std::lock_guard<std::mutex> lock(mutex_);

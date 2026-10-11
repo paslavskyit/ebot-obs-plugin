@@ -141,6 +141,21 @@ std::string update_url()
 	return g_update_url;
 }
 
+std::string dock_handoff_code()
+{
+	Saved saved = load_config();
+	if (saved.token.empty())
+		return "";
+	HttpResponse resp = http_request(server_base(), L"POST", "/api/obs/dock/handoff", "", 15000, saved.token);
+	OBSDataAutoRelease data = obs_data_create_from_json(resp.body.c_str());
+	std::string code = (resp.status == 200 && data) ? obs_data_get_string(data, "code") : "";
+	if (!is_safe_token(code)) {
+		obs_log(LOG_WARNING, "dock handoff failed (HTTP %lu)", resp.status);
+		return "";
+	}
+	return code;
+}
+
 // latest.json з останнього релізу публічного репо: {"version","url"}.
 void check_update_async()
 {
