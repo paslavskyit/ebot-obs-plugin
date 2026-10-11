@@ -15,6 +15,7 @@
 #include <QDesktopServices>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMessageBox>
 #include <QMetaObject>
 #include <QPalette>
 #include <QPointer>
@@ -176,14 +177,24 @@ void create_dock()
 	note->setVisible(false);
 
 	// Прив'язаний канал: одна компактна смуга — пульту нижче потрібне місце.
+	// Оновити й від'єднати — квадратні іконки з підказкою; гліф бере колір тексту
+	// теми OBS (стандартні піктограми Qt на темних темах губились).
 	auto *linked_row = new QWidget();
 	auto *row = new QHBoxLayout(linked_row);
 	row->setContentsMargins(0, 0, 0, 0);
-	auto *refresh_btn = new QPushButton(t("Button.RefreshDock"));
+	auto icon_button = [](const char *glyph, const char *tip_key) {
+		auto *b = new QPushButton(QString::fromUtf8(glyph));
+		b->setToolTip(t(tip_key));
+		b->setAccessibleName(t(tip_key));
+		b->setFixedWidth(b->sizeHint().height());
+		return b;
+	};
 	auto *cabinet_btn = new QPushButton(t("Button.Cabinet"));
-	auto *disconnect_btn = new QPushButton(t("Button.Disconnect"));
-	for (QPushButton *b : {refresh_btn, cabinet_btn, disconnect_btn})
-		row->addWidget(b);
+	auto *refresh_btn = icon_button("↻", "Button.RefreshDock");
+	auto *disconnect_btn = icon_button("✕", "Button.Disconnect");
+	row->addWidget(cabinet_btn, 1);
+	row->addWidget(refresh_btn);
+	row->addWidget(disconnect_btn);
 
 	for (QWidget *w : {static_cast<QWidget *>(status), static_cast<QWidget *>(code), static_cast<QWidget *>(hint),
 			   static_cast<QWidget *>(connect_btn), static_cast<QWidget *>(cancel_btn), linked_row,
@@ -238,6 +249,10 @@ void create_dock()
 	QObject::connect(cabinet_btn, &QPushButton::clicked,
 			 [] { QDesktopServices::openUrl(QUrl("https://ebot.live/widgets?tab=obs")); });
 	QObject::connect(disconnect_btn, &QPushButton::clicked, [=] {
+		// Маленький хрестик легко зачепити, а повернути — лише новою прив'язкою.
+		if (QMessageBox::question(root, t("Disconnect.ConfirmTitle"), t("Disconnect.ConfirmText")) !=
+		    QMessageBox::Yes)
+			return;
 		clear_config();
 		set_channel_name("");
 		relay().set_token("");
