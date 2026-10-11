@@ -92,7 +92,8 @@ static bool ensure_browser()
 		return false;
 	if (!g_cef) {
 		g_cef = obs_browser_init_panel();
-		if (!g_cef || obs_browser_qcef_version() < 1) {
+		// closeBrowser (його кличе вихід) з'явився у версії 2 — як у BrowserDock самого OBS.
+		if (!g_cef || obs_browser_qcef_version() < 2) {
 			g_cef = nullptr;
 			g_no_browser = true;
 			show_note(t("Dock.NoBrowser"));
@@ -264,10 +265,23 @@ void dock_theme_changed()
 
 void dock_shutdown()
 {
-	// CEF треба закрити до виходу OBS, інакше він падає на знищенні віджета.
+	// Порядок — як у самого OBS (BrowserDock::closeEvent, DestroyPanelCookieManager,
+	// delete cef): закрити й знищити браузер, скинути й знищити сховище cookies,
+	// знищити QCef. Живе сховище cookies на момент вивантаження obs-browser — це
+	// CHECK у CEF і падіння OBS при закритті (crash 11.10.2026, libcef 80000003).
 	++g_load_gen;
-	if (g_browser)
+	g_frontend_ready = false;
+	if (g_browser) {
 		g_browser->closeBrowser();
+		delete g_browser.data();
+	}
+	if (g_cookies) {
+		g_cookies->FlushStore();
+		delete g_cookies;
+		g_cookies = nullptr;
+	}
+	delete g_cef;
+	g_cef = nullptr;
 }
 
 } // namespace ebot
