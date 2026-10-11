@@ -10,7 +10,10 @@ class WsConnection {
 public:
 	~WsConnection();
 	// http_status — статус відповіді на апгрейд (0 — мережа не відповіла).
-	bool open(const std::string &base, const std::string &path_and_query, unsigned long &http_status);
+	// bearer — relay-токен заголовком Authorization: у рядку запиту його
+	// писали б у логи сервера на кожне підключення.
+	bool open(const std::string &base, const std::string &path, const std::string &bearer,
+		  unsigned long &http_status);
 	bool send_text(const std::string &text);
 	// false — з'єднання закрите або обірване; close_code — код від сервера (0, якщо не було).
 	bool receive_text(std::string &out, unsigned short &close_code);

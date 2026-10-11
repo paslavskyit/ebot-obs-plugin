@@ -14,7 +14,8 @@ WsConnection::~WsConnection()
 		WinHttpCloseHandle(session_);
 }
 
-bool WsConnection::open(const std::string &base, const std::string &path_and_query, unsigned long &http_status)
+bool WsConnection::open(const std::string &base, const std::string &path, const std::string &bearer,
+			unsigned long &http_status)
 {
 	http_status = 0;
 	ServerParts parts;
@@ -29,8 +30,9 @@ bool WsConnection::open(const std::string &base, const std::string &path_and_que
 	connect_ = WinHttpConnect(session_, parts.host.c_str(), parts.port, 0);
 	if (!connect_)
 		return false;
-	std::wstring path = widen(path_and_query);
-	HINTERNET request = WinHttpOpenRequest(connect_, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER,
+	std::wstring wide_path = widen(path);
+	std::wstring headers = auth_header(bearer);
+	HINTERNET request = WinHttpOpenRequest(connect_, L"GET", wide_path.c_str(), nullptr, WINHTTP_NO_REFERER,
 					       WINHTTP_DEFAULT_ACCEPT_TYPES, parts.secure ? WINHTTP_FLAG_SECURE : 0);
 	if (!request)
 		return false;
@@ -40,7 +42,8 @@ bool WsConnection::open(const std::string &base, const std::string &path_and_que
 		return false;
 	}
 	BOOL ok = WinHttpSetOption(request, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0) &&
-		  WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, nullptr, 0, 0, 0) &&
+		  WinHttpSendRequest(request, headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
+				     headers.empty() ? 0 : (DWORD)-1L, nullptr, 0, 0, 0) &&
 		  WinHttpReceiveResponse(request, nullptr);
 	DWORD status = 0, size = sizeof(status);
 	if (ok)

@@ -8,9 +8,14 @@
 #include <obs.hpp>
 #include <obs-module.h>
 #include <plugin-support.h>
+#include <QCoreApplication>
+#include <QDesktopServices>
+#include <QMetaObject>
+#include <QString>
+#include <QUrl>
 #include <windows.h>
-#include <shellapi.h>
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <thread>
 
@@ -21,6 +26,16 @@ static PairStatus g_status;
 static std::string g_channel;
 static std::string g_update_url;
 static std::atomic<int> g_generation{0}; // «Скасувати» = новий номер, старий потік виходить
+
+// Браузер — з UI-потоку OBS через Qt: ShellExecuteW з робочого потоку без COM
+// і без права на передній план міг не відкрити вкладку або сховати її за OBS.
+static void open_in_browser(const std::string &url)
+{
+	QString target = QString::fromStdString(url);
+	QMetaObject::invokeMethod(
+		QCoreApplication::instance(), [target] { QDesktopServices::openUrl(QUrl(target)); },
+		Qt::QueuedConnection);
+}
 
 static std::string computer_name()
 {
@@ -56,19 +71,24 @@ static void run_pairing(int generation)
 	long long interval = (std::max)(1LL, (long long)obs_data_get_int(data, "interval"));
 	long long expires = obs_data_get_int(data, "expires_in");
 	set_status(generation, {obs_data_get_string(data, "user_code"), "", true});
-	if (verify_url.rfind("https://", 0) == 0 || verify_url.rfind("http://localhost", 0) == 0)
-		ShellExecuteW(nullptr, L"open", widen(verify_url).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+	if (is_safe_verify_url(verify_url) && generation == g_generation)
+		open_in_browser(verify_url);
 
+	// Дедлайн за годинником, а не сумою пауз: без мережі кожен запит чекає ще
+	// свої 15 с, і «10 хвилин» розтягувались на півтори години.
+	auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(expires);
 	std::string poll_body = body_with("device_code", device_code);
-	for (long long waited = 0; waited < expires && generation == g_generation; waited += interval) {
+	while (std::chrono::steady_clock::now() < deadline && generation == g_generation) {
 		Sleep((DWORD)(interval * 1000));
 		if (generation != g_generation)
 			return;
 		HttpResponse resp = http_request(server_base(), L"POST", "/api/obs/pair/poll", poll_body, 15000);
-		if (resp.status == 202 || resp.status == 0)
-			continue; // ще чекаємо / мережа блимнула
+		if (resp.status == 202 || resp.status == 0 || resp.status == 429)
+			continue; // ще чекаємо / мережа блимнула / забагато запитів — не «код протух»
 		if (resp.status != 200)
 			break;
+		if (generation != g_generation)
+			return; // «Скасувати», поки летіла відповідь: токен не зберігаємо
 		OBSDataAutoRelease done = obs_data_create_from_json(resp.body.c_str());
 		std::string token = done ? obs_data_get_string(done, "token") : "";
 		if (!is_safe_token(token))

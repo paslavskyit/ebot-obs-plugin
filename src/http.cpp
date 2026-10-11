@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <winhttp.h>
 #include <cstdlib>
+#include <fstream>
 #include <mutex>
 #include <set>
 
@@ -86,59 +87,144 @@ bool parse_base(const std::string &base, ServerParts &out)
 	return true;
 }
 
+std::wstring auth_header(const std::string &bearer)
+{
+	return bearer.empty() ? std::wstring() : L"Authorization: Bearer " + widen(bearer) + L"\r\n";
+}
+
+namespace {
+// Сесія → з'єднання → запит; закриває все сам. Запит реєструється в g_inflight,
+// щоб http_abort_all() міг обірвати його з іншого потоку.
+class Exchange {
+public:
+	DWORD status = 0;
+
+	~Exchange()
+	{
+		if (request_ && (!tracked_ || untrack(request_)))
+			WinHttpCloseHandle(request_);
+		if (connect_)
+			WinHttpCloseHandle(connect_);
+		if (session_)
+			WinHttpCloseHandle(session_);
+	}
+
+	bool send(const std::string &base, const wchar_t *method, const std::string &path, const std::string &body,
+		  unsigned long timeout_ms, const std::string &bearer)
+	{
+		ServerParts parts;
+		if (!parse_base(base, parts))
+			return false;
+		session_ = WinHttpOpen(L"ebot-obs", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
+				       WINHTTP_NO_PROXY_BYPASS, 0);
+		connect_ = session_ ? WinHttpConnect(session_, parts.host.c_str(), parts.port, 0) : nullptr;
+		std::wstring wide_path = widen(path);
+		request_ = connect_ ? WinHttpOpenRequest(connect_, method, wide_path.c_str(), nullptr, WINHTTP_NO_REFERER,
+							 WINHTTP_DEFAULT_ACCEPT_TYPES, parts.secure ? WINHTTP_FLAG_SECURE : 0)
+				    : nullptr;
+		tracked_ = request_ && track(request_);
+		if (!tracked_)
+			return false;
+		int t = (int)timeout_ms;
+		WinHttpSetTimeouts(request_, t, t, t, t);
+		std::wstring headers = auth_header(bearer);
+		if (!body.empty())
+			headers += L"Content-Type: application/json\r\n";
+		if (!WinHttpSendRequest(request_, headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
+					headers.empty() ? 0 : (DWORD)-1L, (LPVOID)body.data(), (DWORD)body.size(),
+					(DWORD)body.size(), 0) ||
+		    !WinHttpReceiveResponse(request_, nullptr))
+			return false;
+		DWORD size = sizeof(status);
+		WinHttpQueryHeaders(request_, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+				    WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX);
+		DWORD len_size = sizeof(expected_);
+		has_length_ = WinHttpQueryHeaders(request_, WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
+						  WINHTTP_HEADER_NAME_BY_INDEX, &expected_, &len_size,
+						  WINHTTP_NO_HEADER_INDEX) != FALSE;
+		return true;
+	}
+
+	// Тіло шматками в sink (false з sink — зупинитись). true — тіло прочитане
+	// повністю: обірване посеред — збій, а не «200 з половиною архіву».
+	template<typename Sink> bool read_body(Sink &&sink, size_t &total)
+	{
+		char buf[16384];
+		total = 0;
+		for (;;) {
+			DWORD read = 0;
+			if (!WinHttpReadData(request_, buf, sizeof buf, &read))
+				return false;
+			if (read == 0)
+				break;
+			if (!sink(buf, read))
+				return false;
+			total += read;
+		}
+		return !has_length_ || total == expected_;
+	}
+
+private:
+	HINTERNET session_ = nullptr;
+	HINTERNET connect_ = nullptr;
+	HINTERNET request_ = nullptr;
+	bool tracked_ = false;
+	bool has_length_ = false;
+	DWORD expected_ = 0;
+};
+} // namespace
+
 HttpResponse http_request(const std::string &base, const wchar_t *method, const std::string &path_and_query,
-			  const std::string &json_body, unsigned long timeout_ms)
+			  const std::string &json_body, unsigned long timeout_ms, const std::string &bearer)
 {
 	HttpResponse result;
-	ServerParts parts;
-	if (!parse_base(base, parts))
+	Exchange ex;
+	if (!ex.send(base, method, path_and_query, json_body, timeout_ms, bearer))
 		return result;
-	HINTERNET session = WinHttpOpen(L"ebot-obs", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
-					WINHTTP_NO_PROXY_BYPASS, 0);
-	HINTERNET connect = session ? WinHttpConnect(session, parts.host.c_str(), parts.port, 0) : nullptr;
-	std::wstring path = widen(path_and_query);
-	HINTERNET request = connect ? WinHttpOpenRequest(connect, method, path.c_str(), nullptr, WINHTTP_NO_REFERER,
-							 WINHTTP_DEFAULT_ACCEPT_TYPES,
-							 parts.secure ? WINHTTP_FLAG_SECURE : 0)
-				    : nullptr;
-	bool tracked = request && track(request);
-	if (tracked) {
-		int t = (int)timeout_ms;
-		WinHttpSetTimeouts(request, t, t, t, t);
-		const wchar_t *headers = json_body.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS
-							   : L"Content-Type: application/json\r\n";
-		DWORD headers_len = json_body.empty() ? 0 : (DWORD)-1L;
-		BOOL ok = WinHttpSendRequest(request, headers, headers_len, (LPVOID)json_body.data(),
-					     (DWORD)json_body.size(), (DWORD)json_body.size(), 0) &&
-			  WinHttpReceiveResponse(request, nullptr);
-		if (ok) {
-			DWORD status = 0, size = sizeof(status);
-			WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-					    WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX);
-			DWORD expected = 0, len_size = sizeof(expected);
-			BOOL has_length = WinHttpQueryHeaders(request, WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
-							      WINHTTP_HEADER_NAME_BY_INDEX, &expected, &len_size,
-							      WINHTTP_NO_HEADER_INDEX);
-			char buf[16384];
-			DWORD read = 0;
-			BOOL read_ok = TRUE;
-			for (;;) {
-				read_ok = WinHttpReadData(request, buf, sizeof buf, &read);
-				if (!read_ok || read == 0)
-					break;
-				result.body.append(buf, read);
-			}
-			// Обірване посеред тіла — збій, а не «200 з половиною архіву».
-			bool complete = read_ok && (!has_length || result.body.size() == expected);
-			result.status = complete ? status : 0;
-		}
+	size_t total = 0;
+	bool complete = ex.read_body(
+		[&](const char *data, DWORD n) {
+			result.body.append(data, n);
+			return true;
+		},
+		total);
+	result.status = complete ? ex.status : 0;
+	return result;
+}
+
+DownloadResult http_download(const std::string &base, const std::string &path, const std::string &bearer,
+			     const std::filesystem::path &file, unsigned long timeout_ms)
+{
+	DownloadResult result;
+	Exchange ex;
+	if (!ex.send(base, L"GET", path, "", timeout_ms, bearer))
+		return result;
+	size_t total = 0;
+	if (ex.status != 200) {
+		// Помилка сервера: початок тіла — для тексту помилки, файл не чіпаємо.
+		ex.read_body(
+			[&](const char *data, DWORD n) {
+				result.error_body.append(data, n);
+				return result.error_body.size() < 512;
+			},
+			total);
+		result.status = ex.status;
+		return result;
 	}
-	if (request && (!tracked || untrack(request)))
-		WinHttpCloseHandle(request);
-	if (connect)
-		WinHttpCloseHandle(connect);
-	if (session)
-		WinHttpCloseHandle(session);
+	std::ofstream out(file, std::ios::binary | std::ios::trunc);
+	if (!out) {
+		result.write_failed = true;
+		return result;
+	}
+	bool complete = ex.read_body(
+		[&](const char *data, DWORD n) {
+			out.write(data, (std::streamsize)n);
+			return out.good();
+		},
+		result.bytes);
+	out.close();
+	result.write_failed = !out.good();
+	result.status = (complete && !result.write_failed) ? 200 : 0;
 	return result;
 }
 

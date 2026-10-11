@@ -14,6 +14,11 @@ WebSocket і без окремого вікна релею.
 Вручну: розпакуйте `ebot-obs-windows.zip` у `%ProgramData%\obs-studio\plugins\`
 (вийде `…\plugins\ebot-obs\bin\64bit\ebot-obs.dll`).
 
+**Портативний OBS** (поруч з `obs64.exe` лежить `portable_mode.txt`) теку ProgramData не читає —
+інсталятор там не допоможе. Розкладіть файли з `ebot-obs-windows.zip` у теку самого OBS:
+`ebot-obs\bin\64bit\ebot-obs.dll` → `<OBS>\obs-plugins\64bit\`, а `ebot-obs\data\locale` →
+`<OBS>\data\obs-plugins\ebot-obs\locale`. Оновлення — так само вручну.
+
 **Вимоги:** Windows 10/11 x64, OBS Studio **31** або новіший (плагін зібраний проти SDK 31.1).
 macOS і Linux — через скрипт-релей з кабінету.
 

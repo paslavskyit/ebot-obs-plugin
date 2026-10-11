@@ -67,6 +67,48 @@ int main()
 	assert(classify_handshake(502) == CloseKind::Retry); // деплой Railway
 	assert(classify_handshake(0) == CloseKind::Retry);   // мережа
 
+	// 1013 «Try Again Later»: сервер не зміг перевірити токен (база зайнята) —
+	// це не відмова, а звичайне перепідключення.
+	assert(classify_close(1013) == CloseKind::Retry);
+
+	// GetProfileParameter — лише пари, які читає сервер (VOD-доріжки), а не
+	// будь-який ключ профілю (там лежать Twitch-токени входу OBS).
+	assert(is_allowed_profile_param("AdvOut", "VodTrackIndex"));
+	assert(is_allowed_profile_param("Output", "Mode"));
+	assert(!is_allowed_profile_param("Twitch", "Token"));
+	assert(!is_allowed_profile_param("AdvOut", "RecFilePath"));
+
+	// Перша спроба після обриву — за пів секунди, далі вдвічі довше до стелі,
+	// розкид не виводить за стелю.
+	assert(reconnect_delay_ms(0, 0.0) == RECONNECT_FIRST_MS);
+	assert(reconnect_delay_ms(0, 1.0) <= 2 * RECONNECT_FIRST_MS);
+	assert(reconnect_delay_ms(1, 0.0) == 2 * RECONNECT_FIRST_MS);
+	assert(reconnect_delay_ms(30, 1.0) == RECONNECT_MAX_MS);
+	assert(reconnect_delay_ms(-3, 0.0) == RECONNECT_FIRST_MS);
+
+	// «Токен не прийнято» теж пробуємо знову: 30 с, 60 с, … до 5 хв.
+	assert(rejected_retry_delay_ms(0, 0.0) == REJECTED_RETRY_FIRST_MS);
+	assert(rejected_retry_delay_ms(1, 0.0) == 2 * REJECTED_RETRY_FIRST_MS);
+	assert(rejected_retry_delay_ms(20, 1.0) == REJECTED_RETRY_MAX_MS);
+
+	// Текст помилки — формат obsws-python, який сервер уже розбирає.
+	assert(obs_error_text("SetCurrentProgramScene", 600, "No source was found by the name of `X`.") ==
+	       "Request SetCurrentProgramScene returned code 600. With message: No source was found by the name of `X`.");
+	assert(obs_error_text("GetStats", 207, "") == "Request GetStats returned code 207");
+
+	// Важкі запити — у свою чергу; решта (і всі зміни стану OBS) — по порядку.
+	assert(is_heavy_request("get_screenshot", ""));
+	assert(is_heavy_request("obs_call", "GetStats"));
+	assert(!is_heavy_request("obs_call", "StartStream"));
+	assert(!is_heavy_request("set_scene", ""));
+
+	assert(is_safe_verify_url("https://ebot.live/widgets?tab=obs&pair=ABCD-2345"));
+	assert(is_safe_verify_url("http://localhost:3000/widgets?pair=X"));
+	assert(!is_safe_verify_url("http://localhost@evil.com/widgets"));
+	assert(!is_safe_verify_url("https://ebot.live@evil.com/"));
+	assert(!is_safe_verify_url("file:///C:/Windows/system32/calc.exe"));
+	assert(!is_safe_verify_url("http://ebot.live/"));
+
 	std::puts("core_test: ok");
 	return 0;
 }

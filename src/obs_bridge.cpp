@@ -23,14 +23,14 @@ static double now_sec()
 static std::string call(const char *type, obs_data_t *data = nullptr)
 {
 	obs_websocket_request_response *r = obs_websocket_call_request(type, data);
-	if (!r)
-		throw std::runtime_error("obs-websocket недоступний");
+	if (!r) // obs-websocket ще не готовий: старт OBS, зміна колекції сцен, вихід
+		throw std::runtime_error(OBS_NOT_READY_ERROR);
 	std::string out = r->response_data ? r->response_data : "{}";
 	unsigned int code = r->status_code;
 	std::string comment = r->comment ? r->comment : "";
 	obs_websocket_request_response_free(r);
-	if (code != 100) // RequestStatus::Success
-		throw std::runtime_error(comment.empty() ? "OBS request failed: " + std::to_string(code) : comment);
+	if (code != 100) // RequestStatus::Success; текст — формат obsws-python, сервер його розбирає
+		throw std::runtime_error(obs_error_text(type, code, comment));
 	return out;
 }
 
@@ -44,14 +44,18 @@ static std::string success()
 	return "{\"success\":true}";
 }
 
+// Прямо з OBS, не через obs-websocket: той відмовляє, поки «не готовий», — а
+// саме тоді (зміна колекції сцен) OBS і повідомляє про нову сцену.
 std::string current_scene_name()
 {
-	try {
-		OBSDataAutoRelease resp = call_obj("GetCurrentProgramScene");
-		return obs_data_get_string(resp, "currentProgramSceneName");
-	} catch (...) {
-		return "";
-	}
+	OBSSourceAutoRelease scene = obs_frontend_get_current_scene();
+	const char *name = scene ? obs_source_get_name(scene) : nullptr;
+	return name ? name : "";
+}
+
+void bridge_init()
+{
+	obs_websocket_ensure_ph(); // один раз з UI-потоку, а не навипередки з потоку релею
 }
 
 static std::string get_scenes_list()
@@ -137,8 +141,8 @@ static std::string get_screenshot(obs_data_t *params)
 
 static std::string get_version()
 {
-	OBSDataAutoRelease resp = call_obj("GetVersion");
-	return "{\"version\":" + json_quote(obs_data_get_string(resp, "obsVersion")) +
+	// Напряму з libobs: GetVersion через obs-websocket падав на старті OBS.
+	return "{\"version\":" + json_quote(obs_get_version_string()) +
 	       ",\"relay_version\":" + std::to_string(RELAY_VERSION) + ",\"client\":" + json_quote(PLUGIN_CLIENT) +
 	       ",\"plugin_version\":" + json_quote(PLUGIN_VERSION) + "}";
 }
@@ -179,15 +183,18 @@ static void free_meter(Meter &m, bool disconnect)
 	delete m.name;
 }
 
+// data — лише ключ для пошуку, не розіменовуємо: після bridge_shutdown() сигнал
+// джерела, що знищується відкладено, може прийти з уже звільненим рядком.
 static void on_source_destroy(void *data, calldata_t *)
 {
-	std::string name = *static_cast<std::string *>(data);
 	std::lock_guard<std::mutex> lock(g_meters_mutex);
-	auto it = g_meters.find(name);
-	if (it == g_meters.end())
+	for (auto it = g_meters.begin(); it != g_meters.end(); ++it) {
+		if (it->second.name != data)
+			continue;
+		free_meter(it->second, false); // сигнал уже йде — відписуватись нема від чого
+		g_meters.erase(it);
 		return;
-	free_meter(it->second, false); // сигнал уже йде — відписуватись нема від чого
-	g_meters.erase(it);
+	}
 }
 
 // Перший get_mic_level для входу вмикає лічильник; до нього seen_samples == 0,
@@ -235,6 +242,12 @@ static std::string obs_call(obs_data_t *params)
 	if (!is_allowed_request(request))
 		return "{\"error\":" + json_quote("request not allowed: " + request) + "}";
 	OBSDataAutoRelease data = obs_data_get_obj(params, "data");
+	if (request == "GetProfileParameter") {
+		std::string category = data ? obs_data_get_string(data, "parameterCategory") : "";
+		std::string name = data ? obs_data_get_string(data, "parameterName") : "";
+		if (!is_allowed_profile_param(category, name))
+			return "{\"error\":" + json_quote("profile parameter not allowed: " + category + "/" + name) + "}";
+	}
 	return call(request.c_str(), data);
 }
 

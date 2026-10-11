@@ -45,7 +45,12 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" dist/ebot-obs-setup.exe ebot-obs-windows.zip latest.json --title "${{ github.ref_name }}" --notes "єБот для OBS ${{ github.ref_name }}"
+        # Тег без підняття version у buildspec.json дав би реліз, якого док не
+        # запропонує (latest.json несе стару версію) — такий реліз не публікуємо.
+        run: |
+          $version = (Get-Content buildspec.json -Raw | ConvertFrom-Json).version
+          if ("v$version" -ne "${{ github.ref_name }}") { throw "tag ${{ github.ref_name }} != buildspec version v$version" }
+          gh release create "${{ github.ref_name }}" dist/ebot-obs-setup.exe ebot-obs-windows.zip latest.json --title "${{ github.ref_name }}" --notes "єБот для OBS ${{ github.ref_name }}"
   core-test:
     runs-on: ubuntu-latest
     steps:
