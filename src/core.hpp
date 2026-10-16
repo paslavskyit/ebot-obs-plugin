@@ -44,9 +44,11 @@ inline const std::set<std::pair<std::string, std::string>> OBS_PROFILE_PARAMS_AL
 	{"AdvOut", "TrackIndex"},    {"AdvOut", "VodTrackIndex"},     {"AdvOut", "VodTrackEnabled"},
 };
 
-// Перепідключення: перша спроба майже одразу, далі вдвічі довше до стелі; розкид
-// — щоб після деплою всі плагіни не стукали в ту саму секунду.
-constexpr int RECONNECT_FIRST_MS = 500;
+// Перепідключення — «повний розкид»: пауза випадкова від 0 до вікна, вікно
+// вдвічі ширше з кожною спробою до стелі. Деплой рве всі з'єднання разом, і
+// перша спроба за 0,5–1 с означала, що весь парк плагінів стукав у новий
+// інстанс в ту саму секунду (рев'ю 16.10.2026).
+constexpr int RECONNECT_FIRST_MS = 5000;
 constexpr int RECONNECT_MAX_MS = 30000;
 constexpr int STABLE_CONNECTION_MS = 60000; // протрималось стільки — лічильник спроб з нуля
 // «Токен не прийнято» теж пробуємо знову, але рідко: збій сервера не має
@@ -55,6 +57,24 @@ constexpr int REJECTED_RETRY_FIRST_MS = 30000;
 constexpr int REJECTED_RETRY_MAX_MS = 300000;
 constexpr int PING_INTERVAL_MS = 15000;
 constexpr int SILENCE_LIMIT_MS = 35000; // жодного кадру (навіть pong) — з'єднання мертве
+
+// Скільки сервер чекає відповіді на запит (OBS_RELAY_REQUEST_TIMEOUT_SEC
+// основного репо). Запит, що пролежав у черзі довше, сервер уже оголосив
+// невдалим — виконати його зараз означало б «примарну» дію: сцена чи старт
+// стріму через пів хвилини після того, як стример побачив «не вдалося».
+constexpr int REQUEST_STALE_MS = 5000;
+
+// Пульт у доці: повтор одноразового коду, коли сервер не дав його (503, мережа).
+// Раніше повтор ішов на кожному тіку таймера дока — двічі на секунду без кінця.
+constexpr int DOCK_RETRY_FIRST_MS = 5000;
+constexpr int DOCK_RETRY_MAX_MS = 60000;
+
+// Перевірка нової версії (latest.json на GitHub) — раз на добу, не лише на старті.
+constexpr int UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+// Коди закриття WS від сервера (obs_relay_server основного репо).
+constexpr unsigned short RELAY_CLOSE_REJECTED = 4001; // токен не прийнято
+constexpr unsigned short RELAY_CLOSE_REPLACED = 4002; // канал підключено з іншого ПК
 
 // Тексти помилок OBS у форматі obsws-python: сервер (_map_relay_error) розбирає саме їх.
 constexpr const char *OBS_NOT_READY_ERROR = "OBS is not ready (returned code 207)";
@@ -70,6 +90,12 @@ bool is_safe_verify_url(const std::string &url);
 // jitter — від 0 до 1 (випадкове), attempt — 0 для першої спроби.
 int reconnect_delay_ms(int attempt, double jitter);
 int rejected_retry_delay_ms(int attempt, double jitter);
+// Пауза перед повтором коду пульта; 429 («забагато спроб») — без автоповтору:
+// кожна спроба лише продовжує блок, і то для всіх за тією самою адресою.
+int dock_retry_delay_ms(int attempt);
+bool dock_auto_retry(unsigned long http_status);
+// Хост адреси в нижньому регістрі, без порту; "" — не http(s) або з «user@».
+std::string url_host(const std::string &url);
 std::string obs_error_text(const std::string &request, unsigned int code, const std::string &comment);
 std::pair<int, int> clamp_screenshot_size(long long width, long long height);
 std::string backup_filename(const std::string &trigger, const std::tm &when);
@@ -78,9 +104,11 @@ bool is_safe_token(const std::string &token);
 std::string json_quote(const std::string &text);
 double peak_to_db(const float *peaks, int channels);
 
-enum class CloseKind { Retry, Rejected };
-// Код закриття WS від сервера: 4001 = relay-токен не прийнято; 1013 «спробуй
-// пізніше» (сервер не зміг перевірити токен) — звичайне перепідключення.
+enum class CloseKind { Retry, Rejected, Replaced };
+// Код закриття WS від сервера: 4001 = relay-токен не прийнято; 4002 = той самий
+// канал підключився з іншого ПК (або поруч лишився старий релей) — тут не
+// перепідключаємось самі, інакше два ПК відбирали б канал один в одного;
+// 1013 «спробуй пізніше» (сервер не зміг перевірити токен) — звичайне перепідключення.
 CloseKind classify_close(unsigned short code);
 // HTTP-статус невдалого рукостискання WS: 401/403 = токен не прийнято (uvicorn
 // відхиляє поганий токен ще до accept), решта — мережа чи деплой, пробуємо ще.

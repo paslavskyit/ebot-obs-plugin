@@ -12,7 +12,10 @@
 #include <obs-module.h>
 #include <plugin-support.h>
 #include <QApplication>
+#include <QClipboard>
+#include <QDateTime>
 #include <QDesktopServices>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
@@ -41,6 +44,8 @@ static bool g_frontend_ready = false; // FINISHED_LOADING: можна підні
 static bool g_no_browser = false;     // OBS без obs-browser — пульту нема де жити
 static bool g_loaded = false;         // пульт відкрито для поточного токена
 static bool g_load_failed = false;    // код не отримали — спробуємо, щойно релей підключиться
+static int g_retry_attempt = 0;       // невдалі автоповтори коду поспіль
+static qint64 g_retry_at = 0;         // не раніше (мс, QDateTime); 0 — без автоповтору (429)
 
 static QString t(const char *key)
 {
@@ -59,6 +64,8 @@ static QString state_text(LinkState state)
 		return t("State.Offline");
 	case LinkState::Rejected:
 		return t("State.Rejected");
+	case LinkState::Replaced:
+		return t("State.Replaced");
 	default:
 		return t("State.NoToken");
 	}
@@ -114,7 +121,8 @@ static bool ensure_browser()
 }
 
 // Кожне відкриття — новий одноразовий код: сервер не пускає код двічі.
-static void load_panel()
+// manual — кнопка «Оновити пульт» чи нова тема: паузи автоповтору з нуля.
+static void load_panel(bool manual = true)
 {
 	if (!ensure_browser())
 		return;
@@ -122,19 +130,30 @@ static void load_panel()
 	DockTheme theme = current_theme(); // палітра — лише з UI-потоку
 	g_loaded = true;
 	g_load_failed = false;
+	if (manual)
+		g_retry_attempt = 0;
 	show_note(t("Dock.Opening"));
 	std::thread([gen, theme] {
-		std::string code = dock_handoff_code();
+		unsigned long status = 0;
+		std::string code = dock_handoff_code(status);
 		QMetaObject::invokeMethod(
 			QCoreApplication::instance(),
-			[gen, theme, code] {
+			[gen, theme, code, status] {
 				if (gen != g_load_gen || !g_browser)
 					return;
 				if (code.empty()) {
+					// Повтор — з паузою 5 → 60 с, а після 429 лише вручну:
+					// інакше док стукав двічі на секунду, і ліміт сервера на
+					// адресу закривав пульт усім за тим самим NAT.
 					g_load_failed = true;
+					g_retry_at = dock_auto_retry(status)
+							     ? QDateTime::currentMSecsSinceEpoch() +
+								       dock_retry_delay_ms(g_retry_attempt++)
+							     : 0;
 					show_note(t("Dock.Failed"));
 					return;
 				}
+				g_retry_attempt = 0;
 				show_note("");
 				g_browser->setURL(server_base() + dock_enter_path(code, theme));
 			},
@@ -153,6 +172,37 @@ static void unload_panel()
 	if (g_cookies)
 		g_cookies->DeleteCookies("", "");
 	show_note("");
+}
+
+static const char *state_name(LinkState state)
+{
+	switch (state) {
+	case LinkState::Connected:
+		return "connected";
+	case LinkState::Connecting:
+		return "connecting";
+	case LinkState::Offline:
+		return "offline";
+	case LinkState::Rejected:
+		return "rejected (4001)";
+	case LinkState::Replaced:
+		return "replaced by another PC (4002)";
+	default:
+		return "not linked";
+	}
+}
+
+// Для підтримки: версії, стан, причина останнього збою. Без токена й кодів.
+static std::string diagnostics_text()
+{
+	RelayDiagnostics d = relay().diagnostics();
+	std::string text = std::string("eBot OBS plugin ") + PLUGIN_VERSION + "\nOBS " + obs_get_version_string() +
+			   "\nServer: " + server_base() + "\nChannel: " + (channel_name().empty() ? "-" : channel_name()) +
+			   "\nState: " + state_name(d.state) + "\nLast error: ";
+	text += d.last_error.empty() ? "-" : d.last_error + " (" + std::to_string(d.error_age_sec) + " s ago)";
+	text += "\nDock: ";
+	text += g_no_browser ? "no obs-browser" : (g_load_failed ? "handoff failed" : (g_loaded ? "loaded" : "idle"));
+	return text + "\n";
 }
 
 void create_dock()
@@ -198,13 +248,19 @@ void create_dock()
 	};
 	auto *cabinet_btn = new QPushButton(t("Button.Cabinet"));
 	auto *refresh_btn = icon_button("icon-refresh", QStyle::SP_BrowserReload, "Button.RefreshDock");
+	// Класу «копіювати» тема OBS не має — стандартна іконка Qt.
+	auto *diag_btn = icon_button("", QStyle::SP_MessageBoxInformation, "Button.CopyDiagnostics");
 	auto *disconnect_btn = icon_button("icon-close", QStyle::SP_DialogCloseButton, "Button.Disconnect");
 	row->addWidget(cabinet_btn, 1);
 	row->addWidget(refresh_btn);
+	row->addWidget(diag_btn);
 	row->addWidget(disconnect_btn);
+	// 4002: канал перейшов на інший ПК — повертаємо лише кнопкою.
+	auto *here_btn = new QPushButton(t("Button.ConnectHere"));
 
 	for (QWidget *w : {static_cast<QWidget *>(status), static_cast<QWidget *>(code), static_cast<QWidget *>(hint),
-			   static_cast<QWidget *>(connect_btn), static_cast<QWidget *>(cancel_btn), linked_row,
+			   static_cast<QWidget *>(connect_btn), static_cast<QWidget *>(cancel_btn),
+			   static_cast<QWidget *>(here_btn), linked_row,
 			   static_cast<QWidget *>(update), static_cast<QWidget *>(note)})
 		layout->addWidget(w);
 	// Поки пульту нема (не прив'язано, OBS без браузера) — кнопки притиснуті догори.
@@ -227,6 +283,7 @@ void create_dock()
 		code->setVisible(!pair.user_code.empty());
 		hint->setVisible(!pair.user_code.empty());
 		connect_btn->setVisible(!pair.active && (!linked || state == LinkState::Rejected));
+		here_btn->setVisible(!pair.active && state == LinkState::Replaced);
 		cancel_btn->setVisible(pair.active);
 		linked_row->setVisible(linked && !pair.active);
 		refresh_btn->setVisible(!g_no_browser);
@@ -234,8 +291,11 @@ void create_dock()
 		update->setVisible(!url.isEmpty());
 		update->setText(QString("<a href=\"%1\">%2</a>").arg(url.toHtmlEscaped(), t("Update.Available")));
 
-		if (linked && g_frontend_ready && (!g_loaded || (g_load_failed && state == LinkState::Connected)))
+		bool retry_due = g_load_failed && g_retry_at && QDateTime::currentMSecsSinceEpoch() >= g_retry_at;
+		if (linked && g_frontend_ready && !g_loaded)
 			load_panel();
+		else if (linked && retry_due && state == LinkState::Connected)
+			load_panel(false);
 		else if (!linked && g_loaded)
 			unload_panel();
 		bool panel = linked && g_browser;
@@ -253,6 +313,18 @@ void create_dock()
 		refresh();
 	});
 	QObject::connect(refresh_btn, &QPushButton::clicked, [] { load_panel(); });
+	QObject::connect(here_btn, &QPushButton::clicked, [=] {
+		relay().reconnect();
+		refresh();
+	});
+	QObject::connect(diag_btn, &QPushButton::clicked, [] {
+		QGuiApplication::clipboard()->setText(QString::fromStdString(diagnostics_text()));
+		show_note(t("Dock.DiagnosticsCopied"));
+		QTimer::singleShot(3000, [] {
+			if (g_note && g_note->text() == t("Dock.DiagnosticsCopied"))
+				show_note("");
+		});
+	});
 	QObject::connect(cabinet_btn, &QPushButton::clicked,
 			 [] { QDesktopServices::openUrl(QUrl("https://ebot.live/widgets?tab=obs")); });
 	QObject::connect(disconnect_btn, &QPushButton::clicked, [=] {
@@ -270,6 +342,12 @@ void create_dock()
 	QObject::connect(timer, &QTimer::timeout, root, refresh);
 	refresh(); // без цього на старті на мить блимали всі кнопки разом
 	timer->start(500);
+
+	// Перевірка оновлень раз на добу: на старті вона вже йде (post_load), а OBS
+	// часто працює днями — нову версію інакше видно лише після перезапуску.
+	auto *update_timer = new QTimer(root);
+	QObject::connect(update_timer, &QTimer::timeout, root, [] { check_update_async(); });
+	update_timer->start(UPDATE_CHECK_INTERVAL_MS);
 
 	obs_frontend_add_dock_by_id("ebot-dock", obs_module_text("Dock.Title"), root);
 }

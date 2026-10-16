@@ -1,5 +1,6 @@
 // Запити до єБота через WinHTTP — вбудований у Windows, TLS через Schannel.
 #include "http.hpp"
+#include "core.hpp"
 #include <windows.h>
 #include <winhttp.h>
 #include <cstdlib>
@@ -61,12 +62,17 @@ std::string narrow(const std::wstring &text)
 
 std::string server_base()
 {
+	static const std::string fallback = "https://api.ebot.live";
 	char *env = nullptr;
 	size_t len = 0;
-	std::string base = "https://api.ebot.live";
+	std::string base = fallback;
 	if (_dupenv_s(&env, &len, "EBOT_SERVER") == 0 && env && *env)
 		base = env;
 	free(env);
+	// Relay-токен іде заголовком на цю адресу: http — лише до локального сервера
+	// розробника, інакше токен летів би відкритим текстом.
+	if (!is_safe_verify_url(base))
+		return fallback;
 	return base;
 }
 

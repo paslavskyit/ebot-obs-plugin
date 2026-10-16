@@ -78,13 +78,34 @@ int main()
 	assert(!is_allowed_profile_param("Twitch", "Token"));
 	assert(!is_allowed_profile_param("AdvOut", "RecFilePath"));
 
-	// Перша спроба після обриву — за пів секунди, далі вдвічі довше до стелі,
-	// розкид не виводить за стелю.
-	assert(reconnect_delay_ms(0, 0.0) == RECONNECT_FIRST_MS);
-	assert(reconnect_delay_ms(0, 1.0) <= 2 * RECONNECT_FIRST_MS);
-	assert(reconnect_delay_ms(1, 0.0) == 2 * RECONNECT_FIRST_MS);
+	// Перепідключення — повний розкид: перша пауза від 0 до 5 с (деплой рве всіх
+	// разом — не стукати в одну секунду), далі вікно вдвічі ширше до стелі.
+	assert(reconnect_delay_ms(0, 0.0) == 0);
+	assert(reconnect_delay_ms(0, 1.0) == RECONNECT_FIRST_MS);
+	assert(reconnect_delay_ms(0, 0.5) == RECONNECT_FIRST_MS / 2);
+	assert(reconnect_delay_ms(1, 1.0) == 2 * RECONNECT_FIRST_MS);
 	assert(reconnect_delay_ms(30, 1.0) == RECONNECT_MAX_MS);
-	assert(reconnect_delay_ms(-3, 0.0) == RECONNECT_FIRST_MS);
+	assert(reconnect_delay_ms(30, 2.0) == RECONNECT_MAX_MS);
+	assert(reconnect_delay_ms(-3, 1.0) == RECONNECT_FIRST_MS);
+
+	// Пульт: повтор коду 5 → 10 → … → 60 с, а не двічі на секунду; 429 — без автоповтору.
+	assert(dock_retry_delay_ms(0) == DOCK_RETRY_FIRST_MS);
+	assert(dock_retry_delay_ms(1) == 2 * DOCK_RETRY_FIRST_MS);
+	assert(dock_retry_delay_ms(10) == DOCK_RETRY_MAX_MS);
+	assert(dock_auto_retry(503) && dock_auto_retry(0));
+	assert(!dock_auto_retry(429));
+
+	// GetInputSettings віддає адресу лише джерел єБота: URL алертів сторонніх
+	// сервісів несуть їхні секретні токени й не мають іти на сервер.
+	assert(url_host("https://API.ebot.live/widget/music_overlay.html?token=x") == "api.ebot.live");
+	assert(url_host("http://localhost:8000/widget") == "localhost");
+	assert(url_host("https://ebot.live") == "ebot.live");
+	assert(url_host("https://api.ebot.live@evil.com/x") == "");
+	assert(url_host("file:///C:/overlay.html") == "");
+	assert(url_host("") == "");
+
+	// 4002 — канал підключено з іншого ПК: не перепідключатись самим.
+	assert(classify_close(4002) == CloseKind::Replaced);
 
 	// «Токен не прийнято» теж пробуємо знову: 30 с, 60 с, … до 5 хв.
 	assert(rejected_retry_delay_ms(0, 0.0) == REJECTED_RETRY_FIRST_MS);

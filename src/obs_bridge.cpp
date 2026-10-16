@@ -2,7 +2,9 @@
 // Форма відповідей — як в obs_relay.py, бо сервер розбирає один формат.
 #include "obs_bridge.hpp"
 #include "core.hpp"
+#include "http.hpp"
 #include "obs-websocket-api.h"
+#include "relay_client.hpp"
 #include <obs.hpp>
 #include <obs-frontend-api.h>
 #include <plugin-support.h>
@@ -10,6 +12,7 @@
 #include <map>
 #include <mutex>
 #include <stdexcept>
+#include <vector>
 
 namespace ebot {
 
@@ -154,7 +157,7 @@ static std::string get_version()
 struct Meter {
 	obs_volmeter_t *meter = nullptr;
 	obs_weak_source_t *weak = nullptr;
-	std::string *name = nullptr; // параметр і колбека лічильника, і сигналу destroy
+	std::string *name = nullptr; // параметр колбека лічильника й ключ сигналів джерела
 };
 
 static MicPeaks g_peaks;
@@ -166,35 +169,62 @@ static void meter_cb(void *param, const float *, const float *peak, const float 
 	g_peaks.add(*static_cast<std::string *>(param), now_sec(), peak_to_db(peak, MAX_AUDIO_CHANNELS));
 }
 
-static void on_source_destroy(void *data, calldata_t *);
+static void on_source_gone(void *data, calldata_t *);
+static void on_source_mute(void *data, calldata_t *cd);
 
-static void free_meter(Meter &m, bool disconnect)
+// Сигнали джерела, на які підписаний лічильник. «remove» (джерело видалили) і
+// «rename» (ключ лічильника — назва) звільняють його, поки джерело ще живе:
+// лише тоді obs_volmeter_detach_source справді знімає аудіоколбек з джерела.
+// «destroy» лишається запасним шляхом (колекція сцен, вихід OBS).
+static const char *const METER_SIGNALS[] = {"remove", "rename", "destroy"};
+
+// Без g_meters_mutex: відписка чекає на м'ютекс сигналу, а обробник сигналу
+// (on_source_gone) бере g_meters_mutex — тримати обидва навхрест = взаємне блокування.
+static void free_meter(Meter &m)
 {
+	OBSSourceAutoRelease source = obs_weak_source_get_source(m.weak);
+	if (source) {
+		signal_handler_t *sh = obs_source_get_signal_handler(source);
+		for (const char *signal : METER_SIGNALS)
+			signal_handler_disconnect(sh, signal, on_source_gone, m.name);
+		signal_handler_disconnect(sh, "mute", on_source_mute, m.name);
+	}
 	obs_volmeter_remove_callback(m.meter, meter_cb, m.name);
 	obs_volmeter_detach_source(m.meter);
 	obs_volmeter_destroy(m.meter);
-	if (disconnect) {
-		OBSSourceAutoRelease source = obs_weak_source_get_source(m.weak);
-		if (source)
-			signal_handler_disconnect(obs_source_get_signal_handler(source), "destroy", on_source_destroy,
-						  m.name);
-	}
 	obs_weak_source_release(m.weak);
 	delete m.name;
 }
 
 // data — лише ключ для пошуку, не розіменовуємо: після bridge_shutdown() сигнал
 // джерела, що знищується відкладено, може прийти з уже звільненим рядком.
-static void on_source_destroy(void *data, calldata_t *)
+static void on_source_gone(void *data, calldata_t *)
 {
-	std::lock_guard<std::mutex> lock(g_meters_mutex);
-	for (auto it = g_meters.begin(); it != g_meters.end(); ++it) {
-		if (it->second.name != data)
-			continue;
-		free_meter(it->second, false); // сигнал уже йде — відписуватись нема від чого
+	Meter gone;
+	{
+		std::lock_guard<std::mutex> lock(g_meters_mutex);
+		auto it = g_meters.begin();
+		while (it != g_meters.end() && it->second.name != data)
+			++it;
+		if (it == g_meters.end())
+			return;
+		gone = it->second;
 		g_meters.erase(it);
-		return;
 	}
+	free_meter(gone);
+}
+
+// Мікрофон, за яким стежить сервер, вимкнули чи ввімкнули — одразу пушем, а не
+// на наступному тіку сторожа. Назва — з самого джерела (живе під час свого
+// сигналу), а не з data: див. on_source_gone.
+static void on_source_mute(void *, calldata_t *cd)
+{
+	auto *source = static_cast<obs_source_t *>(calldata_ptr(cd, "source"));
+	const char *name = source ? obs_source_get_name(source) : nullptr;
+	if (!name || !*name)
+		return;
+	relay().push("{\"type\":\"input_mute\",\"input\":" + json_quote(name) +
+		     ",\"muted\":" + (calldata_bool(cd, "muted") ? "true" : "false") + "}");
 }
 
 // Перший get_mic_level для входу вмикає лічильник; до нього seen_samples == 0,
@@ -213,7 +243,10 @@ static void ensure_meter(const std::string &name)
 	m.name = new std::string(name);
 	obs_volmeter_add_callback(m.meter, meter_cb, m.name);
 	obs_volmeter_attach_source(m.meter, source);
-	signal_handler_connect(obs_source_get_signal_handler(source), "destroy", on_source_destroy, m.name);
+	signal_handler_t *sh = obs_source_get_signal_handler(source);
+	for (const char *signal : METER_SIGNALS)
+		signal_handler_connect(sh, signal, on_source_gone, m.name);
+	signal_handler_connect(sh, "mute", on_source_mute, m.name);
 	g_meters[name] = m;
 }
 
@@ -236,6 +269,21 @@ static std::string get_mic_level(obs_data_t *params)
 	       "}";
 }
 
+// GetInputSettings віддає ВСІ налаштування входу, а серверу потрібна лише адреса
+// плеєра музики (services/obs_vod_audio.py). URL алертів сторонніх сервісів несуть
+// їхні секретні токени — тож адреса йде лише тоді, коли веде на сервер єБота.
+static std::string input_settings_url_only(const std::string &json)
+{
+	OBSDataAutoRelease resp = obs_data_create_from_json(json.c_str());
+	OBSDataAutoRelease settings = resp ? obs_data_get_obj(resp, "inputSettings") : nullptr;
+	std::string url = settings ? obs_data_get_string(settings, "url") : "";
+	std::string own = url_host(server_base());
+	bool ours = !own.empty() && url_host(url) == own;
+	std::string kind = resp ? obs_data_get_string(resp, "inputKind") : "";
+	return "{\"inputKind\":" + json_quote(kind) + ",\"inputSettings\":" +
+	       (ours ? "{\"url\":" + json_quote(url) + "}" : std::string("{}")) + "}";
+}
+
 static std::string obs_call(obs_data_t *params)
 {
 	std::string request = obs_data_get_string(params, "request");
@@ -248,6 +296,8 @@ static std::string obs_call(obs_data_t *params)
 		if (!is_allowed_profile_param(category, name))
 			return "{\"error\":" + json_quote("profile parameter not allowed: " + category + "/" + name) + "}";
 	}
+	if (request == "GetInputSettings")
+		return input_settings_url_only(call(request.c_str(), data));
 	return call(request.c_str(), data);
 }
 
@@ -280,10 +330,21 @@ std::string dispatch(const std::string &method, obs_data_t *params)
 
 void bridge_shutdown()
 {
-	std::lock_guard<std::mutex> lock(g_meters_mutex);
-	for (auto &[name, m] : g_meters)
-		free_meter(m, true);
-	g_meters.clear();
+	std::vector<Meter> meters;
+	{
+		std::lock_guard<std::mutex> lock(g_meters_mutex);
+		for (auto &[name, m] : g_meters)
+			meters.push_back(m);
+		g_meters.clear();
+	}
+	for (Meter &m : meters)
+		free_meter(m);
+}
+
+std::string outputs_frame()
+{
+	return std::string("{\"type\":\"outputs\",\"stream\":") + (obs_frontend_streaming_active() ? "true" : "false") +
+	       ",\"record\":" + (obs_frontend_recording_active() ? "true" : "false") + "}";
 }
 
 } // namespace ebot

@@ -34,7 +34,8 @@ RelayClient &relay()
 void RelayClient::start()
 {
 	stop_ = false;
-	heavy_thread_ = std::thread([this] { heavy_loop(); });
+	light_.thread = std::thread([this] { job_loop(light_); });
+	heavy_.thread = std::thread([this] { job_loop(heavy_); });
 	thread_ = std::thread([this] { run(); });
 }
 
@@ -47,10 +48,12 @@ void RelayClient::request_stop()
 			current_->abort();
 	}
 	cv_.notify_all();
-	{
-		std::lock_guard<std::mutex> lock(heavy_mutex_);
+	for (JobQueue *queue : {&light_, &heavy_}) {
+		{
+			std::lock_guard<std::mutex> lock(queue->mutex);
+		}
+		queue->cv.notify_all();
 	}
-	heavy_cv_.notify_all();
 }
 
 void RelayClient::stop()
@@ -59,8 +62,9 @@ void RelayClient::stop()
 	http_abort_all(); // бекап, що качається, обривається одразу, а не за 120 с
 	if (thread_.joinable())
 		thread_.join();
-	if (heavy_thread_.joinable())
-		heavy_thread_.join();
+	for (JobQueue *queue : {&light_, &heavy_})
+		if (queue->thread.joinable())
+			queue->thread.join();
 	std::thread backup;
 	{
 		std::lock_guard<std::mutex> lock(backup_mutex_);
@@ -81,6 +85,36 @@ void RelayClient::set_token(std::string token)
 	cv_.notify_all();
 }
 
+void RelayClient::reconnect()
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	if (token_.empty())
+		return;
+	++token_gen_; // будить run(), що чекає після 4002, і скидає паузи
+	if (current_)
+		current_->abort();
+	state_ = LinkState::Connecting;
+	cv_.notify_all();
+}
+
+void RelayClient::set_error(std::string text)
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	last_error_ = std::move(text);
+	last_error_ms_ = now_ms();
+}
+
+RelayDiagnostics RelayClient::diagnostics()
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	RelayDiagnostics out;
+	out.state = state_.load();
+	out.last_error = last_error_;
+	if (!last_error_.empty())
+		out.error_age_sec = (now_ms() - last_error_ms_) / 1000;
+	return out;
+}
+
 void RelayClient::sleep_interruptible(int ms, int token_gen)
 {
 	std::unique_lock<std::mutex> lock(mutex_);
@@ -90,12 +124,14 @@ void RelayClient::sleep_interruptible(int ms, int token_gen)
 
 // Без мережі рукостискання падає щоразу: у лог — лише зміна причини, а не рядок
 // кожні кілька секунд у журналі, який стример надсилає підтримці.
-void RelayClient::log_handshake_failure(unsigned long http_status)
+void RelayClient::log_handshake_failure(unsigned long http_status, unsigned long win_error)
 {
+	set_error(http_status ? "handshake: HTTP " + std::to_string(http_status)
+			      : "handshake: network/TLS, WinHTTP error " + std::to_string(win_error));
 	if (http_status == last_logged_status_)
 		return;
 	last_logged_status_ = http_status;
-	obs_log(LOG_WARNING, "eBot handshake failed (HTTP %lu)", http_status);
+	obs_log(LOG_WARNING, "eBot handshake failed (HTTP %lu, WinHTTP %lu)", http_status, win_error);
 }
 
 void RelayClient::run()
@@ -120,6 +156,9 @@ void RelayClient::run()
 			queue_.clear();
 			state_ = LinkState::Connecting; // під тим самим замком, що й токен
 		}
+		// Запити старого з'єднання: сервер їх уже не чекає (відповіді пішли б
+		// у нове з'єднання), а скріншоти й GetStats тягнули б GPU і диск даремно.
+		clear_jobs();
 		if (gen != last_gen) { // новий токен — паузи з нуля
 			attempt = 0;
 			rejected_attempt = 0;
@@ -127,18 +166,30 @@ void RelayClient::run()
 		}
 		long long started = now_ms();
 		unsigned long http_status = 0;
-		bool rejected = false;
-		if (ws.open(server_base(), "/api/ws/obs-relay", token, http_status)) {
-			rejected = serve(ws);
+		CloseKind kind = CloseKind::Retry;
+		// caps=replaced: цей клієнт розуміє 4002 і сам не перепідключається —
+		// лише таким сервер шле 4002 (старий клієнт перепідключився б і вибив новий).
+		if (ws.open(server_base(), "/api/ws/obs-relay?caps=replaced", token, http_status)) {
+			kind = serve(ws);
 		} else if (!stop_) {
-			log_handshake_failure(http_status);
-			rejected = classify_handshake(http_status) == CloseKind::Rejected;
+			log_handshake_failure(http_status, ws.win_error());
+			kind = classify_handshake(http_status);
 		}
+		bool rejected = kind == CloseKind::Rejected;
 		{
-			std::lock_guard<std::mutex> lock(mutex_);
+			std::unique_lock<std::mutex> lock(mutex_);
 			current_ = nullptr;
 			if (gen == token_gen_) // токен не міняли, поки підключались
-				state_ = rejected ? LinkState::Rejected : LinkState::Offline;
+				state_ = rejected                         ? LinkState::Rejected
+					 : kind == CloseKind::Replaced ? LinkState::Replaced
+								       : LinkState::Offline;
+			if (kind == CloseKind::Replaced) {
+				// Канал тепер обслуговує інший ПК (або поруч лишився старий
+				// релей): сам не повертаємось — два клієнти відбирали б канал
+				// один в одного. Чекаємо кнопки «Підключити тут» чи нового токена.
+				cv_.wait(lock, [this, gen] { return stop_.load() || token_gen_ != gen; });
+				continue;
+			}
 		}
 		if (now_ms() - started >= STABLE_CONNECTION_MS)
 			attempt = 0;
@@ -152,7 +203,7 @@ void RelayClient::run()
 	}
 }
 
-bool RelayClient::serve(WsConnection &ws)
+CloseKind RelayClient::serve(WsConnection &ws)
 {
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
@@ -165,18 +216,25 @@ bool RelayClient::serve(WsConnection &ws)
 	last_logged_status_ = ULONG_MAX; // наступний збій рукостискання — знову в лог
 	obs_log(LOG_INFO, "connected to eBot");
 	std::thread writer_thread([this, &ws] { writer(ws); });
+	// Ресинк стану на кожне (пере)підключення: сервер міг перезапуститись і
+	// не знати ні сцени, ні того, чи йде стрім.
 	push_scene(current_scene_name());
+	push(outputs_frame());
 
 	std::string frame;
 	unsigned short close_code = 0;
 	while (!stop_ && ws.receive_text(frame, close_code)) {
 		last_rx_ms_ = now_ms();
 		if (frame != "pong")
-			handle(frame);
+			handle(frame, last_rx_ms_);
 	}
-	bool rejected = classify_close(close_code) == CloseKind::Rejected;
-	if (rejected)
+	CloseKind kind = classify_close(close_code);
+	if (kind == CloseKind::Rejected)
 		obs_log(LOG_WARNING, "eBot rejected the relay token (4001)");
+	else if (kind == CloseKind::Replaced)
+		obs_log(LOG_WARNING, "eBot: this channel connected from another OBS (4002), not reconnecting");
+	if (!stop_)
+		set_error(close_code ? "closed by server, code " + std::to_string(close_code) : "connection lost");
 	ws.abort();
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
@@ -185,7 +243,7 @@ bool RelayClient::serve(WsConnection &ws)
 	cv_.notify_all();
 	writer_thread.join();
 	obs_log(LOG_INFO, "disconnected from eBot");
-	return rejected;
+	return kind;
 }
 
 // Єдиний, хто пише в сокет: кадри з черги, ping, сторож тиші.
@@ -208,6 +266,7 @@ void RelayClient::writer(WsConnection &ws)
 		long long now = now_ms();
 		if (now - last_rx_ms_ > SILENCE_LIMIT_MS) {
 			obs_log(LOG_WARNING, "no frames from eBot for %d s, reconnecting", SILENCE_LIMIT_MS / 1000);
+			set_error("no frames from server for " + std::to_string(SILENCE_LIMIT_MS / 1000) + " s");
 			ws.abort();
 			return;
 		}
@@ -231,6 +290,12 @@ void RelayClient::enqueue(std::string frame)
 	cv_.notify_all();
 }
 
+void RelayClient::push(std::string frame)
+{
+	if (!frame.empty())
+		enqueue(std::move(frame));
+}
+
 // UI-потік OBS: лише кладе кадр у чергу, нічого не чекає.
 void RelayClient::push_scene(const std::string &scene)
 {
@@ -245,28 +310,44 @@ void RelayClient::push_scene(const std::string &scene)
 	enqueue("{\"type\":\"scene_changed\",\"scene\":" + json_quote(scene) + "}");
 }
 
-void RelayClient::post_heavy(std::function<void()> job)
+void RelayClient::post(JobQueue &queue, long long received_ms, std::function<void()> job)
 {
 	{
-		std::lock_guard<std::mutex> lock(heavy_mutex_);
-		heavy_jobs_.push_back(std::move(job));
+		std::lock_guard<std::mutex> lock(queue.mutex);
+		queue.jobs.emplace_back(received_ms, std::move(job));
 	}
-	heavy_cv_.notify_one();
+	queue.cv.notify_one();
 }
 
-void RelayClient::heavy_loop()
+void RelayClient::clear_jobs()
+{
+	for (JobQueue *queue : {&light_, &heavy_}) {
+		std::lock_guard<std::mutex> lock(queue->mutex);
+		queue->jobs.clear();
+	}
+}
+
+// Запит, що чекав у черзі довше, ніж сервер чекає відповіді, не виконується:
+// сервер уже сказав стримеру «не вдалося», і пізня дія (сцена, старт стріму)
+// була б «примарною», а пізній скріншот — зайвою роботою GPU поруч з енкодером.
+void RelayClient::job_loop(JobQueue &queue)
 {
 	for (;;) {
-		std::function<void()> job;
+		std::pair<long long, std::function<void()>> job;
 		{
-			std::unique_lock<std::mutex> lock(heavy_mutex_);
-			heavy_cv_.wait(lock, [this] { return stop_.load() || !heavy_jobs_.empty(); });
+			std::unique_lock<std::mutex> lock(queue.mutex);
+			queue.cv.wait(lock, [this, &queue] { return stop_.load() || !queue.jobs.empty(); });
 			if (stop_)
 				return; // OBS закривається: черга не доробляється
-			job = std::move(heavy_jobs_.front());
-			heavy_jobs_.pop_front();
+			job = std::move(queue.jobs.front());
+			queue.jobs.pop_front();
 		}
-		job();
+		long long waited = now_ms() - job.first;
+		if (waited > REQUEST_STALE_MS) {
+			obs_log(LOG_WARNING, "eBot request dropped: waited %lld ms in the queue", waited);
+			continue;
+		}
+		job.second();
 	}
 }
 
@@ -386,7 +467,7 @@ void RelayClient::start_backup(const std::string &id, const std::string &trigger
 	});
 }
 
-void RelayClient::handle(const std::string &raw)
+void RelayClient::handle(const std::string &raw, long long received_ms)
 {
 	OBSDataAutoRelease msg = obs_data_create_from_json(raw.c_str());
 	if (!msg)
@@ -404,29 +485,22 @@ void RelayClient::handle(const std::string &raw)
 	}
 	if (stop_)
 		return; // OBS закривається: не смикаємо UI-потік запитами
-	if (is_heavy_request(method, obs_data_get_string(params, "request"))) {
-		const char *params_json = obs_data_get_json(params);
-		std::string json = params_json ? params_json : "{}";
-		post_heavy([this, id, method, json] {
-			OBSDataAutoRelease job_params = obs_data_create_from_json(json.c_str());
-			try {
-				enqueue(reply_ok(id, dispatch(method, job_params)));
-			} catch (const std::exception &e) {
-				enqueue(reply_error(id, e.what()));
-			}
-		});
-		return;
-	}
-	try {
-		enqueue(reply_ok(id, dispatch(method, params)));
-		// OBS шле SCENE_CHANGED лише наприкінці переходу (0,3 с fade, 1–3 с
-		// стингер) — нова сцена вже поточна, тож кажемо серверу одразу. Подія
-		// наприкінці переходу відсіється як повтор.
-		if (method == "set_scene")
-			push_scene(current_scene_name());
-	} catch (const std::exception &e) {
-		enqueue(reply_error(id, e.what()));
-	}
+	const char *params_json = obs_data_get_json(params);
+	std::string json = params_json ? params_json : "{}";
+	JobQueue &queue = is_heavy_request(method, obs_data_get_string(params, "request")) ? heavy_ : light_;
+	post(queue, received_ms, [this, id, method, json] {
+		OBSDataAutoRelease job_params = obs_data_create_from_json(json.c_str());
+		try {
+			enqueue(reply_ok(id, dispatch(method, job_params)));
+			// OBS шле SCENE_CHANGED лише наприкінці переходу (0,3 с fade, 1–3 с
+			// стингер) — нова сцена вже поточна, тож кажемо серверу одразу. Подія
+			// наприкінці переходу відсіється як повтор.
+			if (method == "set_scene")
+				push_scene(current_scene_name());
+		} catch (const std::exception &e) {
+			enqueue(reply_error(id, e.what()));
+		}
+	});
 }
 
 } // namespace ebot
