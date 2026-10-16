@@ -24,6 +24,20 @@ static void on_frontend(enum obs_frontend_event event, void *)
 	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING:
 		ebot::bridge_shutdown();
 		break;
+	// Старт/стоп стріму й запису — пушем: сервер не опитує OBS поза ефіром і
+	// будить сторожа одразу, а не на наступному 15-секундному тіку.
+	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
+	case OBS_FRONTEND_EVENT_RECORDING_STARTED:
+		ebot::relay().push(ebot::outputs_frame());
+		break;
+	case OBS_FRONTEND_EVENT_STREAMING_STOPPED:
+	case OBS_FRONTEND_EVENT_RECORDING_STOPPED:
+		ebot::relay().push(ebot::outputs_frame());
+		// Поза ефіром мікрофон ніхто не читає — лічильник (колбек на кожен
+		// аудіоблок) не тримаємо до наступного стріму.
+		if (!obs_frontend_streaming_active() && !obs_frontend_recording_active())
+			ebot::bridge_shutdown();
+		break;
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
 		ebot::dock_frontend_ready();
 		break;

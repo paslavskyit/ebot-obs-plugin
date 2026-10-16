@@ -141,12 +141,14 @@ std::string update_url()
 	return g_update_url;
 }
 
-std::string dock_handoff_code()
+std::string dock_handoff_code(unsigned long &http_status)
 {
+	http_status = 0;
 	Saved saved = load_config();
 	if (saved.token.empty())
 		return "";
 	HttpResponse resp = http_request(server_base(), L"POST", "/api/obs/dock/handoff", "", 15000, saved.token);
+	http_status = resp.status;
 	OBSDataAutoRelease data = obs_data_create_from_json(resp.body.c_str());
 	std::string code = (resp.status == 200 && data) ? obs_data_get_string(data, "code") : "";
 	if (!is_safe_token(code)) {
@@ -156,7 +158,8 @@ std::string dock_handoff_code()
 	return code;
 }
 
-// latest.json з останнього релізу публічного репо: {"version","url"}.
+// latest.json з останнього релізу публічного репо: {"version","url"}. Кличе
+// старт плагіна і таймер дока раз на добу — OBS часто працює днями.
 void check_update_async()
 {
 	std::thread([] {

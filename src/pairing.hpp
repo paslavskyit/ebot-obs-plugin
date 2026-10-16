@@ -16,6 +16,7 @@ std::string update_url();
 void check_update_async();
 // Одноразовий код входу в пульт (POST /api/obs/dock/handoff relay-токеном): у
 // посилання браузера доку йде код на хвилину, а не сам токен. "" — без токена
-// чи збій. Блокує — кликати з робочого потоку.
-std::string dock_handoff_code();
+// чи збій (http_status — відповідь сервера, 0 — мережа). Блокує — кликати з
+// робочого потоку.
+std::string dock_handoff_code(unsigned long &http_status);
 } // namespace ebot

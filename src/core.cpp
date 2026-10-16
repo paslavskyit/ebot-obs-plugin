@@ -43,12 +43,40 @@ static int backoff_ms(int attempt, double jitter, int first, int cap)
 
 int reconnect_delay_ms(int attempt, double jitter)
 {
-	return backoff_ms(attempt, jitter, RECONNECT_FIRST_MS, RECONNECT_MAX_MS);
+	return int(std::clamp(jitter, 0.0, 1.0) * backoff_ms(attempt, 0.0, RECONNECT_FIRST_MS, RECONNECT_MAX_MS));
 }
 
 int rejected_retry_delay_ms(int attempt, double jitter)
 {
 	return backoff_ms(attempt, jitter, REJECTED_RETRY_FIRST_MS, REJECTED_RETRY_MAX_MS);
+}
+
+int dock_retry_delay_ms(int attempt)
+{
+	return backoff_ms(attempt, 0.0, DOCK_RETRY_FIRST_MS, DOCK_RETRY_MAX_MS);
+}
+
+bool dock_auto_retry(unsigned long http_status)
+{
+	return http_status != 429;
+}
+
+std::string url_host(const std::string &url)
+{
+	std::string lower;
+	for (unsigned char ch : url)
+		lower += (char)std::tolower(ch);
+	size_t start = std::string::npos;
+	for (const char *scheme : {"https://", "http://"})
+		if (lower.rfind(scheme, 0) == 0)
+			start = std::char_traits<char>::length(scheme);
+	if (start == std::string::npos)
+		return "";
+	size_t end = lower.find_first_of("/?#", start);
+	std::string authority = lower.substr(start, end == std::string::npos ? std::string::npos : end - start);
+	if (authority.find('@') != std::string::npos)
+		return "";
+	return authority.substr(0, authority.find(':'));
 }
 
 std::string obs_error_text(const std::string &request, unsigned int code, const std::string &comment)
@@ -147,7 +175,9 @@ double peak_to_db(const float *peaks, int channels)
 
 CloseKind classify_close(unsigned short code)
 {
-	return code == 4001 ? CloseKind::Rejected : CloseKind::Retry;
+	if (code == RELAY_CLOSE_REJECTED)
+		return CloseKind::Rejected;
+	return code == RELAY_CLOSE_REPLACED ? CloseKind::Replaced : CloseKind::Retry;
 }
 
 CloseKind classify_handshake(unsigned long http_status)

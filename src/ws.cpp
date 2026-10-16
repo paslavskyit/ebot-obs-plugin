@@ -41,10 +41,17 @@ bool WsConnection::open(const std::string &base, const std::string &path, const 
 		abort();
 		return false;
 	}
+	// Відповідь на апгрейд — не довше 10 с: тайм-аут читання 0 (без нього тишу
+	// ловить сторож) діяв і тут, і сервер, що прийняв TLS, але не відповів 101,
+	// тримав підключення вічно — сторож тиші стартує лише після апгрейду.
+	DWORD response_timeout = 10000;
+	WinHttpSetOption(request, WINHTTP_OPTION_RECEIVE_RESPONSE_TIMEOUT, &response_timeout, sizeof(response_timeout));
 	BOOL ok = WinHttpSetOption(request, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0) &&
 		  WinHttpSendRequest(request, headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
 				     headers.empty() ? 0 : (DWORD)-1L, nullptr, 0, 0, 0) &&
 		  WinHttpReceiveResponse(request, nullptr);
+	if (!ok)
+		win_error_ = GetLastError();
 	DWORD status = 0, size = sizeof(status);
 	if (ok)
 		WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,

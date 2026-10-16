@@ -18,8 +18,11 @@ public:
 	// false — з'єднання закрите або обірване; close_code — код від сервера (0, якщо не було).
 	bool receive_text(std::string &out, unsigned short &close_code);
 	void abort();
+	// Код WinHTTP останнього збою open() (12175 — TLS, 12002 — тайм-аут…); 0 — не було.
+	unsigned long win_error() const { return win_error_; }
 
 private:
+	unsigned long win_error_ = 0;
 	void *session_ = nullptr;
 	void *connect_ = nullptr;
 	std::atomic<void *> pending_{nullptr}; // запит апгрейду, поки open() чекає сервер

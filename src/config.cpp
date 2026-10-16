@@ -4,6 +4,7 @@
 #include "core.hpp"
 #include <obs-module.h>
 #include <obs.hpp>
+#include <plugin-support.h>
 #include <util/bmem.h>
 #include <util/platform.h>
 #include <windows.h>
@@ -47,8 +48,13 @@ static std::string protect(const std::string &plain)
 		return "";
 	DATA_BLOB in{(DWORD)plain.size(), (BYTE *)plain.data()};
 	DATA_BLOB out{};
-	if (!CryptProtectData(&in, L"ebot", nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out))
+	if (!CryptProtectData(&in, L"ebot", nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out)) {
+		// Мовчки збережений порожній токен — це «від'єднано» після рестарту OBS
+		// без жодного сліду чому.
+		obs_log(LOG_ERROR, "could not protect the relay token with DPAPI (error %lu): it is not saved",
+			GetLastError());
 		return "";
+	}
 	std::vector<BYTE> bytes(out.pbData, out.pbData + out.cbData);
 	LocalFree(out.pbData);
 	return b64(bytes);
