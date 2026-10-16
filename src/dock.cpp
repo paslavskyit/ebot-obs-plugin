@@ -15,6 +15,7 @@
 #include <QClipboard>
 #include <QDateTime>
 #include <QDesktopServices>
+#include <QFontDatabase>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -207,15 +208,28 @@ static std::string diagnostics_text()
 
 void create_dock()
 {
+	// Пульт (сторінка) — врівень із краями доку, як браузерні доки самого OBS:
+	// у пульта свої поля, і поля дока навколо давали подвійну рамку. Поля має
+	// лише смуга стану й кнопок над ним.
 	auto *root = new QWidget();
 	auto *layout = new QVBoxLayout(root);
+	layout->setContentsMargins(0, 0, 0, 0);
+	layout->setSpacing(0);
+	auto *strip = new QWidget();
+	auto *strip_layout = new QVBoxLayout(strip);
+	strip_layout->setContentsMargins(8, 6, 8, 6);
+	strip_layout->setSpacing(6);
 	auto *status = new QLabel();
 	status->setWordWrap(true);
+	// Код читають з екрана і звіряють із сайтом: моноширинний, з проміжками
+	// між знаками, щоб 0/O і 1/I не плутались.
 	auto *code = new QLabel();
-	QFont big = code->font();
-	big.setPointSizeF(big.pointSizeF() > 0 ? big.pointSizeF() * 2 : 20);
+	QFont big = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+	big.setPointSizeF(code->font().pointSizeF() > 0 ? code->font().pointSizeF() * 2 : 20);
 	big.setBold(true);
+	big.setLetterSpacing(QFont::AbsoluteSpacing, 3);
 	code->setFont(big);
+	code->setAlignment(Qt::AlignCenter);
 	code->setTextInteractionFlags(Qt::TextSelectableByMouse);
 	auto *hint = new QLabel(t("Pair.Hint"));
 	hint->setWordWrap(true);
@@ -262,7 +276,8 @@ void create_dock()
 			   static_cast<QWidget *>(connect_btn), static_cast<QWidget *>(cancel_btn),
 			   static_cast<QWidget *>(here_btn), linked_row,
 			   static_cast<QWidget *>(update), static_cast<QWidget *>(note)})
-		layout->addWidget(w);
+		strip_layout->addWidget(w);
+	layout->addWidget(strip);
 	// Поки пульту нема (не прив'язано, OBS без браузера) — кнопки притиснуті догори.
 	auto *filler = new QWidget();
 	layout->addWidget(filler, 1);
