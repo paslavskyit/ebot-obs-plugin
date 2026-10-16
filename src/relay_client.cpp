@@ -167,7 +167,9 @@ void RelayClient::run()
 		long long started = now_ms();
 		unsigned long http_status = 0;
 		CloseKind kind = CloseKind::Retry;
-		if (ws.open(server_base(), "/api/ws/obs-relay", token, http_status)) {
+		// caps=replaced: цей клієнт розуміє 4002 і сам не перепідключається —
+		// лише таким сервер шле 4002 (старий клієнт перепідключився б і вибив новий).
+		if (ws.open(server_base(), "/api/ws/obs-relay?caps=replaced", token, http_status)) {
 			kind = serve(ws);
 		} else if (!stop_) {
 			log_handshake_failure(http_status, ws.win_error());
