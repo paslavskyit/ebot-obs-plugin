@@ -17,11 +17,16 @@ jobs:
       - name: Build
         run: .github/scripts/Build-Windows.ps1 -Target x64 -Configuration RelWithDebInfo
       - name: Stage (ProgramData layout)
+        # OBS 33+ вантажить ebot-obs/ebot-obs.dll, OBS 31–32 знають лише bin/64bit —
+        # кладемо обидві копії, тека data спільна. OBS 33 бере нову і пропускає стару
+        # («Skipping legacy plugin … already loaded»); OBS 34 стару вже не читає, тож
+        # копію в bin/64bit прибрати, коли відмовимось від OBS 31–32.
         run: |
           $dll = Get-ChildItem release -Recurse -Filter ebot-obs.dll | Select-Object -First 1
           $locale = Get-ChildItem release -Recurse -Directory -Filter locale | Select-Object -First 1
           if (-not $dll -or -not $locale) { Get-ChildItem release -Recurse | Select-Object FullName; throw "no dll/locale in release/" }
           New-Item -ItemType Directory -Force stage/ebot-obs/bin/64bit, stage/ebot-obs/data | Out-Null
+          Copy-Item $dll.FullName stage/ebot-obs/
           Copy-Item $dll.FullName stage/ebot-obs/bin/64bit/
           Copy-Item $locale.FullName stage/ebot-obs/data/ -Recurse
           Compress-Archive stage/ebot-obs ebot-obs-windows.zip -Force

@@ -12,14 +12,16 @@ WebSocket і без окремого вікна релею.
    код у кабінеті єБота.
 
 Вручну: розпакуйте `ebot-obs-windows.zip` у `%ProgramData%\obs-studio\plugins\`
-(вийде `…\plugins\ebot-obs\bin\64bit\ebot-obs.dll`).
+(вийде `…\plugins\ebot-obs\ebot-obs.dll`; копія в `bin\64bit` — для OBS 31–32).
 
 **Портативний OBS** (поруч з `obs64.exe` лежить `portable_mode.txt`) теку ProgramData не читає —
-інсталятор там не допоможе. Розкладіть файли з `ebot-obs-windows.zip` у теку самого OBS:
-`ebot-obs\bin\64bit\ebot-obs.dll` → `<OBS>\obs-plugins\64bit\`, а `ebot-obs\data\locale` →
-`<OBS>\data\obs-plugins\ebot-obs\locale`. Оновлення — так само вручну.
+інсталятор там не допоможе. OBS 33+: розпакуйте `ebot-obs-windows.zip` у `<OBS>\plugins\`
+(вийде `<OBS>\plugins\ebot-obs\ebot-obs.dll`). OBS 31–32: `ebot-obs\bin\64bit\ebot-obs.dll` →
+`<OBS>\obs-plugins\64bit\`, а `ebot-obs\data\locale` → `<OBS>\data\obs-plugins\ebot-obs\locale`.
+Оновлення — так само вручну. Перейшли на OBS 33 — приберіть стару копію з `<OBS>\obs-plugins\64bit\`
+і `<OBS>\data\obs-plugins\ebot-obs`: OBS 33 позначає її «Legacy», а OBS 34 уже не завантажить.
 
-**Вимоги:** Windows 10/11 x64, OBS Studio **31** або новіший (плагін зібраний проти SDK 31.1).
+**Вимоги:** Windows 10/11 x64, OBS Studio **31** або новіший (плагін зібраний проти SDK 31.1, перевірено на 33.0).
 macOS і Linux — через скрипт-релей з кабінету.
 
 ## Пульт у доці (0.2+)
