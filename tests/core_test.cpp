@@ -34,6 +34,15 @@ int main()
 	assert(!is_newer_version("0.0.9", "0.1.0"));
 	assert(!is_newer_version("garbage", "0.1.0"));
 
+	// Шляхи, як їх дає OBS: ProgramData (31–32 і 33) — інсталятор; портативний — ні.
+	const char *pd = "C:\\ProgramData\\obs-studio/plugins";
+	assert(path_under("C:\\ProgramData\\obs-studio/plugins/ebot-obs/bin/64bit/ebot-obs.dll", pd));
+	assert(path_under("c:/programdata/OBS-Studio/plugins/ebot-obs/ebot-obs.dll", pd));
+	assert(!path_under("../../plugins/ebot-obs/ebot-obs.dll", pd));
+	assert(!path_under("../../obs-plugins/64bit/ebot-obs.dll", pd));
+	assert(!path_under("C:\\ProgramData\\obs-studio/plugins-old/ebot-obs.dll", pd));
+	assert(!path_under("C:\\ProgramData\\obs-studio/plugins/ebot-obs.dll", ""));
+
 	assert(is_safe_token("abc-DEF_123"));
 	assert(!is_safe_token(""));
 	assert(!is_safe_token("abc&x=1"));

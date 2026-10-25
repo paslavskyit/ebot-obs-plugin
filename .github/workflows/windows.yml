@@ -55,7 +55,7 @@ jobs:
         run: |
           $version = (Get-Content buildspec.json -Raw | ConvertFrom-Json).version
           if ("v$version" -ne "${{ github.ref_name }}") { throw "tag ${{ github.ref_name }} != buildspec version v$version" }
-          gh release create "${{ github.ref_name }}" dist/ebot-obs-setup.exe ebot-obs-windows.zip latest.json --title "${{ github.ref_name }}" --notes "єБот для OBS ${{ github.ref_name }}"
+          gh release create "${{ github.ref_name }}" dist/ebot-obs-setup.exe ebot-obs-windows.zip latest.json --title "${{ github.ref_name }}" --notes "єБот для OBS ${{ github.ref_name }}. Звичайний OBS — запустіть ebot-obs-setup.exe. Портативний OBS 33+ — закрийте OBS і розпакуйте ebot-obs-windows.zip у теку plugins поруч з OBS (старіші версії — див. README)."
   core-test:
     runs-on: ubuntu-latest
     steps:

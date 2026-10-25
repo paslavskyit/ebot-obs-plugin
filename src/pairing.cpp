@@ -8,6 +8,7 @@
 #include <obs.hpp>
 #include <obs-module.h>
 #include <plugin-support.h>
+#include <util/platform.h>
 #include <QCoreApplication>
 #include <QDesktopServices>
 #include <QMetaObject>
@@ -159,6 +160,15 @@ std::string dock_handoff_code(unsigned long &http_status)
 	return code;
 }
 
+static bool installer_copy()
+{
+	char *dir = os_get_program_data_path_ptr("obs-studio/plugins");
+	const char *dll = obs_get_module_binary_path(obs_current_module());
+	bool ok = dir && dll && path_under(dll, dir);
+	bfree(dir);
+	return ok;
+}
+
 // latest.json з останнього релізу публічного репо: {"version","url"}. Кличе
 // старт плагіна і таймер дока раз на добу — OBS часто працює днями.
 void check_update_async()
@@ -174,7 +184,7 @@ void check_update_async()
 		if (is_newer_version(obs_data_get_string(data, "version"), PLUGIN_VERSION) &&
 		    url.rfind("https://github.com/paslavskyit/ebot-obs-plugin/", 0) == 0) {
 			std::lock_guard<std::mutex> lock(g_mutex);
-			g_update_url = url;
+			g_update_url = installer_copy() ? url : RELEASES_PAGE_URL;
 		}
 	}).detach();
 }

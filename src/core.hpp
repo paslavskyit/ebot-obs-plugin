@@ -71,6 +71,9 @@ constexpr int DOCK_RETRY_MAX_MS = 60000;
 
 // Перевірка нової версії (latest.json на GitHub) — раз на добу, не лише на старті.
 constexpr int UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+// Інсталятор оновлює лише копію в ProgramData. Портативний OBS (і ручна
+// розкладка деінде) отримує сторінку релізу: там zip та інструкція.
+constexpr const char *RELEASES_PAGE_URL = "https://github.com/paslavskyit/ebot-obs-plugin/releases/latest";
 
 // Коди закриття WS від сервера (obs_relay_server основного репо).
 constexpr unsigned short RELAY_CLOSE_REJECTED = 4001; // токен не прийнято
@@ -100,6 +103,8 @@ std::string obs_error_text(const std::string &request, unsigned int code, const 
 std::pair<int, int> clamp_screenshot_size(long long width, long long height);
 std::string backup_filename(const std::string &trigger, const std::tm &when);
 bool is_newer_version(const std::string &latest, const std::string &current);
+// Файл лежить у теці: без регістру, «\» = «/» (OBS склеює шляхи з обома).
+bool path_under(const std::string &path, const std::string &dir);
 bool is_safe_token(const std::string &token);
 std::string json_quote(const std::string &text);
 double peak_to_db(const float *peaks, int channels);
