@@ -140,6 +140,11 @@ int main()
 	DockTheme partial{"#000000", "red;}", "", "#ABCDEF", "#12345", "#123456"};
 	assert(dock_enter_path("c", partial) == "/api/obs/dock/enter?code=c&bg=%23000000&muted=%23ABCDEF&accent=%23123456");
 	assert(dock_enter_path("a b&c", DockTheme{}) == "/api/obs/dock/enter?code=a%20b%26c");
+	DockTheme sized{"#000000", "", "", "", "", ""};
+	sized.font_px = 13;
+	assert(dock_enter_path("c", sized) == "/api/obs/dock/enter?code=c&bg=%23000000&fs=13");
+	sized.font_px = 99; // поза межами — сторінка лишає свій розмір
+	assert(dock_enter_path("c", sized) == "/api/obs/dock/enter?code=c&bg=%23000000");
 
 	std::puts("core_test: ok");
 	return 0;

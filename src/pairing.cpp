@@ -70,8 +70,9 @@ static void run_pairing(int generation)
 	std::string verify_url = obs_data_get_string(data, "verify_url");
 	long long interval = (std::max)(1LL, (long long)obs_data_get_int(data, "interval"));
 	long long expires = obs_data_get_int(data, "expires_in");
-	set_status(generation, {obs_data_get_string(data, "user_code"), "", true});
-	if (is_safe_verify_url(verify_url) && generation == g_generation)
+	bool safe_url = is_safe_verify_url(verify_url);
+	set_status(generation, {obs_data_get_string(data, "user_code"), "", true, safe_url ? verify_url : ""});
+	if (safe_url && generation == g_generation)
 		open_in_browser(verify_url);
 
 	// Дедлайн за годинником, а не сумою пауз: без мережі кожен запит чекає ще

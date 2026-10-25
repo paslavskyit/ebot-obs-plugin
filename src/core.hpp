@@ -116,9 +116,14 @@ CloseKind classify_handshake(unsigned long http_status);
 
 // Пульт у доці: кольори поточної теми OBS для сторінки /dock. Ключі — ті самі,
 // що OBS_DOCK_THEME_KEYS сервера; сервер (і сторінка) приймають лише #rrggbb.
+// font_px — розмір шрифту OBS (Налаштування → Вигляд) у px: пульт масштабується
+// разом з ним; поза межами OBS_DOCK_FONT_PX_* сервера не передається.
 struct DockTheme {
 	std::string bg, panel, fg, muted, border, accent;
+	int font_px = 0;
 };
+constexpr int DOCK_FONT_PX_MIN = 9;
+constexpr int DOCK_FONT_PX_MAX = 32;
 std::string hex_color(int r, int g, int b);
 // /api/obs/dock/enter?code=…&bg=%23rrggbb… — невалідні кольори просто не йдуть.
 std::string dock_enter_path(const std::string &code, const DockTheme &theme);

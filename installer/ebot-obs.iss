@@ -21,6 +21,11 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayName=єБот для OBS
+; Іконка єБота (frontend/src/app/icon.png основного репо, 16–256 px) — і в
+; інсталятора, і в «Програмах»: стандартна іконка Inno поруч із попередженням
+; SmartScreen про непідписаний файл виглядала як чужа програма.
+SetupIconFile=ebot.ico
+UninstallDisplayIcon={uninstallexe}
 
 [Languages]
 Name: "uk"; MessagesFile: "compiler:Languages\Ukrainian.isl"

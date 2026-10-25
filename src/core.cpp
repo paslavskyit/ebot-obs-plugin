@@ -225,6 +225,8 @@ std::string dock_enter_path(const std::string &code, const DockTheme &theme)
 	for (const auto &[key, value] : colors)
 		if (is_hex_color(*value))
 			path += std::string("&") + key + "=" + url_encode(*value);
+	if (theme.font_px >= DOCK_FONT_PX_MIN && theme.font_px <= DOCK_FONT_PX_MAX)
+		path += "&fs=" + std::to_string(theme.font_px);
 	return path;
 }
 

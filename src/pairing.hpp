@@ -6,6 +6,7 @@ struct PairStatus {
 	std::string user_code; // "ABCD-2345", поки чекаємо підтвердження
 	std::string error;     // текст для дока
 	bool active = false;
+	std::string verify_url; // сторінка підтвердження — якщо браузер не відкрився сам
 };
 void pair_begin();
 void pair_cancel();
