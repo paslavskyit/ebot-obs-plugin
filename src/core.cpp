@@ -137,6 +137,21 @@ bool is_newer_version(const std::string &latest, const std::string &current)
 	return a > b;
 }
 
+bool path_under(const std::string &path, const std::string &dir)
+{
+	auto norm = [](std::string s) {
+		for (char &ch : s)
+			ch = ch == '\\' ? '/' : (char)std::tolower((unsigned char)ch);
+		return s;
+	};
+	std::string p = norm(path), d = norm(dir);
+	if (d.empty())
+		return false;
+	if (d.back() != '/')
+		d += '/';
+	return p.rfind(d, 0) == 0;
+}
+
 bool is_safe_token(const std::string &token)
 {
 	return !token.empty() && std::all_of(token.begin(), token.end(), [](char ch) {
@@ -225,6 +240,8 @@ std::string dock_enter_path(const std::string &code, const DockTheme &theme)
 	for (const auto &[key, value] : colors)
 		if (is_hex_color(*value))
 			path += std::string("&") + key + "=" + url_encode(*value);
+	if (theme.font_px >= DOCK_FONT_PX_MIN && theme.font_px <= DOCK_FONT_PX_MAX)
+		path += "&fs=" + std::to_string(theme.font_px);
 	return path;
 }
 

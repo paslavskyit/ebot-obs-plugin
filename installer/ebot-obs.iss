@@ -1,5 +1,6 @@
-; Інсталятор плагіна «єБот для OBS»: кладе плагін у ProgramData — OBS 28+
-; сам підхоплює плагіни звідти. Збирає CI (.github/workflows/windows.yml).
+; Інсталятор плагіна «єБот для OBS»: кладе плагін у ProgramData — OBS сам
+; підхоплює плагіни звідти: OBS 33+ — ebot-obs\ebot-obs.dll, OBS 31–32 — копію
+; в bin\64bit (обидві готує CI, .github/workflows/windows.yml).
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif
@@ -21,6 +22,11 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayName=єБот для OBS
+; Іконка єБота (frontend/src/app/icon.png основного репо, 16–256 px) — і в
+; інсталятора, і в «Програмах»: стандартна іконка Inno поруч із попередженням
+; SmartScreen про непідписаний файл виглядала як чужа програма.
+SetupIconFile=ebot.ico
+UninstallDisplayIcon={uninstallexe}
 
 [Languages]
 Name: "uk"; MessagesFile: "compiler:Languages\Ukrainian.isl"

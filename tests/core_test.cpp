@@ -34,6 +34,15 @@ int main()
 	assert(!is_newer_version("0.0.9", "0.1.0"));
 	assert(!is_newer_version("garbage", "0.1.0"));
 
+	// Шляхи, як їх дає OBS: ProgramData (31–32 і 33) — інсталятор; портативний — ні.
+	const char *pd = "C:\\ProgramData\\obs-studio/plugins";
+	assert(path_under("C:\\ProgramData\\obs-studio/plugins/ebot-obs/bin/64bit/ebot-obs.dll", pd));
+	assert(path_under("c:/programdata/OBS-Studio/plugins/ebot-obs/ebot-obs.dll", pd));
+	assert(!path_under("../../plugins/ebot-obs/ebot-obs.dll", pd));
+	assert(!path_under("../../obs-plugins/64bit/ebot-obs.dll", pd));
+	assert(!path_under("C:\\ProgramData\\obs-studio/plugins-old/ebot-obs.dll", pd));
+	assert(!path_under("C:\\ProgramData\\obs-studio/plugins/ebot-obs.dll", ""));
+
 	assert(is_safe_token("abc-DEF_123"));
 	assert(!is_safe_token(""));
 	assert(!is_safe_token("abc&x=1"));
@@ -140,6 +149,11 @@ int main()
 	DockTheme partial{"#000000", "red;}", "", "#ABCDEF", "#12345", "#123456"};
 	assert(dock_enter_path("c", partial) == "/api/obs/dock/enter?code=c&bg=%23000000&muted=%23ABCDEF&accent=%23123456");
 	assert(dock_enter_path("a b&c", DockTheme{}) == "/api/obs/dock/enter?code=a%20b%26c");
+	DockTheme sized{"#000000", "", "", "", "", ""};
+	sized.font_px = 13;
+	assert(dock_enter_path("c", sized) == "/api/obs/dock/enter?code=c&bg=%23000000&fs=13");
+	sized.font_px = 99; // поза межами — сторінка лишає свій розмір
+	assert(dock_enter_path("c", sized) == "/api/obs/dock/enter?code=c&bg=%23000000");
 
 	std::puts("core_test: ok");
 	return 0;
