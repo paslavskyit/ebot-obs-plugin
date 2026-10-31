@@ -9,8 +9,11 @@ using namespace ebot;
 
 int main()
 {
-	assert(OBS_CALL_ALLOWED_REQUESTS.size() == 16);
+	assert(OBS_CALL_ALLOWED_REQUESTS.size() == 19);
 	assert(is_allowed_request("GetStreamStatus"));
+	assert(is_allowed_request("GetVideoSettings"));
+	assert(is_allowed_request("GetSceneItemList"));
+	assert(is_allowed_request("GetGroupSceneItemList"));
 	assert(!is_allowed_request("TriggerHotkeyByName"));
 
 	assert(clamp_screenshot_size(0, 0) == std::make_pair(1280, 720));
