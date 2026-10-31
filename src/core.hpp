@@ -22,6 +22,7 @@ inline const std::set<std::string> OBS_CALL_ALLOWED_REQUESTS = {
 	"GetInputAudioTracks", "GetProfileParameter", "GetSceneItemId",  "GetSceneItemEnabled",
 	"SetSceneItemEnabled", "GetStreamStatus",     "GetRecordStatus", "GetStats",
 	"StartStream",         "StopStream",          "StartRecord",     "StopRecord",
+	"GetVideoSettings",   "GetSceneItemList",    "GetGroupSceneItemList",
 };
 
 constexpr const char *SCREENSHOT_FORMAT = "jpg";
