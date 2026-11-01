@@ -158,6 +158,56 @@ int main()
 	sized.font_px = 99; // поза межами — сторінка лишає свій розмір
 	assert(dock_enter_path("c", sized) == "/api/obs/dock/enter?code=c&bg=%23000000");
 
+	// Заокруглення камери: px з сервера — у межах, сміття — 0.
+	assert(clamp_mask_px(24.4) == 24);
+	assert(clamp_mask_px(24.6) == 25);
+	assert(clamp_mask_px(-3) == 0);
+	assert(clamp_mask_px(NAN) == 0);
+	assert(clamp_mask_px(1e9) == WEBCAM_MASK_MAX_PX);
+
+	// Рівень мікрофона: -60 dB і тихіше — 0, 0 dBFS — 1, посередині — лінійно в dB.
+	assert(mic_level_from_db(-120.0) == 0.0);
+	assert(mic_level_from_db(-60.0) == 0.0);
+	assert(mic_level_from_db(0.0) == 1.0);
+	assert(mic_level_from_db(6.0) == 1.0);
+	assert(std::fabs(mic_level_from_db(-30.0) - 0.5) < 1e-9);
+	assert(std::fabs(mic_level_from_db(-20.0) - 0.67) < 1e-9); // крок 0,01
+	assert(mic_level_from_db(NAN) == 0.0);
+	assert(mic_level_frame(0.45) == "{\"type\":\"mic_level\",\"level\":0.45}");
+	assert(mic_level_frame(0.05) == "{\"type\":\"mic_level\",\"level\":0.05}");
+	assert(mic_level_frame(1.0) == "{\"type\":\"mic_level\",\"level\":1.00}");
+	assert(mic_level_frame(0.0) == "{\"type\":\"mic_level\",\"level\":0.00}");
+
+	// Пуш рівня: не частіше 10/с, максимум піку за вікно, без повторів.
+	MicLevelThrottle throttle;
+	assert(throttle.feed(10.00, -30.0) < 0);              // вікно щойно почалось
+	assert(throttle.feed(10.05, -6.0) < 0);               // гучний склад посеред вікна
+	assert(std::fabs(throttle.feed(10.10, -40.0) - 0.9) < 1e-9); // пушимо максимум вікна (-6 dB)
+	assert(throttle.feed(10.15, -120.0) < 0);             // нове вікно ще триває
+	assert(throttle.feed(10.20, -120.0) == 0.0);          // тиша — один нуль
+	assert(throttle.feed(10.30, -120.0) < 0);             // і більше не повторюється
+	assert(throttle.feed(10.40, -30.0) == 0.5);
+	throttle.reset();
+	assert(throttle.feed(20.00, -30.0) < 0);
+	assert(throttle.feed(20.10, -30.0) == 0.5); // після reset те саме значення знову йде
+
+	// Дебаунс item_transform: подія — лише після 0,5 с тиші, окремо для кожного джерела.
+	Debouncer debounce;
+	Debouncer::Key cam{"Гра", "Камера"}, chat{"Гра", "Чат"};
+	debounce.touch(cam, 1.0);
+	debounce.touch(cam, 1.3); // ще тягнуть — дедлайн зсувається
+	debounce.touch(chat, 1.1);
+	assert(debounce.due(1.5).empty());
+	auto ready = debounce.due(1.65);
+	assert(ready.size() == 1 && ready[0] == chat);
+	assert(debounce.due(1.75).empty()); // камера: 1.3 + 0.5 = 1.8
+	ready = debounce.due(1.85);
+	assert(ready.size() == 1 && ready[0] == cam);
+	assert(debounce.due(9.0).empty()); // забрані ключі не повертаються
+	debounce.touch(cam, 10.0);
+	debounce.clear();
+	assert(debounce.due(11.0).empty());
+
 	std::puts("core_test: ok");
 	return 0;
 }

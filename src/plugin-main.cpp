@@ -7,6 +7,8 @@
 #include "obs_bridge.hpp"
 #include "pairing.hpp"
 #include "relay_client.hpp"
+#include "scene_watch.hpp"
+#include "webcam_mask.hpp"
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
@@ -14,14 +16,18 @@ OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
 static void on_frontend(enum obs_frontend_event event, void *)
 {
 	switch (event) {
+	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED:
+		ebot::bridge_resume_push(); // мікрофон з пуш-рівнем — у новій колекції теж
+		[[fallthrough]];
 	case OBS_FRONTEND_EVENT_SCENE_CHANGED:
 	// Нова колекція сцен і перейменування сцени теж міняють поточну назву;
 	// повтор тієї самої сцени push_scene відсіює.
-	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED:
 	case OBS_FRONTEND_EVENT_SCENE_LIST_CHANGED:
 		ebot::relay().push_scene(ebot::current_scene_name());
+		ebot::scene_watch_bind();
 		break;
 	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING:
+		ebot::scene_watch_unbind();
 		ebot::bridge_shutdown();
 		break;
 	// Старт/стоп стріму й запису — пушем: сервер не опитує OBS поза ефіром і
@@ -34,12 +40,14 @@ static void on_frontend(enum obs_frontend_event event, void *)
 	case OBS_FRONTEND_EVENT_RECORDING_STOPPED:
 		ebot::relay().push(ebot::outputs_frame());
 		// Поза ефіром мікрофон ніхто не читає — лічильник (колбек на кожен
-		// аудіоблок) не тримаємо до наступного стріму.
+		// аудіоблок) не тримаємо до наступного стріму. Крім входу, чий рівень
+		// іде пушем: ефект оверлея сервер вмикав і для прев'ю поза ефіром.
 		if (!obs_frontend_streaming_active() && !obs_frontend_recording_active())
-			ebot::bridge_shutdown();
+			ebot::bridge_shutdown(true);
 		break;
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
 		ebot::dock_frontend_ready();
+		ebot::scene_watch_bind();
 		break;
 	case OBS_FRONTEND_EVENT_THEME_CHANGED:
 		ebot::dock_theme_changed();
@@ -50,6 +58,7 @@ static void on_frontend(enum obs_frontend_event event, void *)
 		// запитів (SCRIPTING_SHUTDOWN раніше за EXIT), а запит, що йде, доробиться,
 		// поки UI ще обробляє події — join в obs_module_unload не зависне.
 		ebot::relay().request_stop();
+		ebot::scene_watch_stop();
 		ebot::bridge_shutdown();
 		break;
 	default:
@@ -59,6 +68,7 @@ static void on_frontend(enum obs_frontend_event event, void *)
 
 bool obs_module_load(void)
 {
+	ebot::register_webcam_mask();
 	obs_frontend_add_event_callback(on_frontend, nullptr);
 	return true;
 }
@@ -67,6 +77,7 @@ bool obs_module_load(void)
 void obs_module_post_load(void)
 {
 	ebot::bridge_init();
+	ebot::scene_watch_start();
 	ebot::create_dock();
 	ebot::Saved saved = ebot::load_config();
 	ebot::set_channel_name(saved.channel);
@@ -81,5 +92,6 @@ void obs_module_unload(void)
 	obs_frontend_remove_event_callback(on_frontend, nullptr);
 	ebot::pair_cancel();
 	ebot::relay().stop();
+	ebot::scene_watch_stop();
 	ebot::bridge_shutdown();
 }

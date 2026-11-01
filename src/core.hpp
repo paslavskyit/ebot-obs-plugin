@@ -8,6 +8,7 @@
 #include <set>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace ebot {
 
@@ -37,6 +38,22 @@ constexpr int BACKUP_DOWNLOAD_TIMEOUT_MS = 120000;
 
 constexpr double MIC_PEAK_WINDOW_SEC = 30.0;
 constexpr double MIC_PEAK_FLOOR_DB = -120.0;
+
+// Рівень мікрофона пушем (`mic_level`, 0.5): не частіше 10 разів на секунду —
+// сирі InputVolumeMeters obs-websocket ідуть 20 Гц на кожен вхід, задорого для
+// релею. Шкала 0..1 — лінійна в dB від MIC_LEVEL_FLOOR_DB до 0 dBFS, як смужка
+// мікшера OBS.
+constexpr double MIC_LEVEL_PUSH_INTERVAL_SEC = 0.1;
+constexpr double MIC_LEVEL_FLOOR_DB = -60.0;
+
+// Пуш `item_transform` (0.5): лише після тиші — перетягування елемента мишею
+// шле зміну на кожен кадр.
+constexpr double ITEM_TRANSFORM_DEBOUNCE_SEC = 0.5;
+
+// Фільтр «єБот: заокруглення камери» (0.5). Id не міняти: за ним команда
+// set_webcam_mask знаходить уже доданий фільтр (назву стример може змінити).
+constexpr const char *WEBCAM_MASK_FILTER_ID = "ebot_webcam_mask";
+constexpr int WEBCAM_MASK_MAX_PX = 4096; // радіус, обрізка й рамка — px джерела
 
 // GetProfileParameter читає будь-який ключ профілю OBS — і Twitch-токени
 // вбудованого входу OBS теж. Сервер питає лише ці пари (services/obs_vod_audio.py).
@@ -109,6 +126,12 @@ bool path_under(const std::string &path, const std::string &dir);
 bool is_safe_token(const std::string &token);
 std::string json_quote(const std::string &text);
 double peak_to_db(const float *peaks, int channels);
+// Значення з сервера (px джерела) → 0..WEBCAM_MASK_MAX_PX; NaN і мінус — 0.
+int clamp_mask_px(double value);
+// Пік у dBFS → 0..1 з кроком 0,01 (MIC_LEVEL_FLOOR_DB і тихіше — 0).
+double mic_level_from_db(double peak_db);
+// {"type":"mic_level","level":0.45} — без printf: десяткова кома локалі не потрапить у JSON.
+std::string mic_level_frame(double level);
 
 enum class CloseKind { Retry, Rejected, Replaced };
 // Код закриття WS від сервера: 4001 = relay-токен не прийнято; 4002 = той самий
@@ -147,6 +170,36 @@ public:
 private:
 	mutable std::mutex mutex_;
 	std::map<std::string, std::deque<std::pair<double, double>>> buffers_;
+};
+
+// Колбек volmeter-а (кожен аудіоблок, ~50 разів на секунду) → пуш `mic_level`:
+// максимум піку за вікно MIC_LEVEL_PUSH_INTERVAL_SEC (короткий склад не
+// губиться між пушами) і без повтору того самого значення (тиша не шле 0 щоразу).
+class MicLevelThrottle {
+public:
+	// Рівень 0..1, який час пушити, або -1 — цього разу нічого не слати.
+	double feed(double now, double peak_db);
+	void reset(); // нове вмикання: вікно й останнє значення з нуля
+
+private:
+	std::mutex mutex_;
+	double window_start_ = -1.0;
+	double max_db_ = MIC_PEAK_FLOOR_DB;
+	double last_sent_ = -1.0;
+};
+
+// Дебаунс пушу `item_transform`: ключ (сцена, джерело) відстоюється, поки
+// touch не повторювались ITEM_TRANSFORM_DEBOUNCE_SEC.
+class Debouncer {
+public:
+	using Key = std::pair<std::string, std::string>;
+	void touch(const Key &key, double now);
+	std::vector<Key> due(double now); // ключі, що відстоялися (забирає їх)
+	void clear();
+
+private:
+	std::mutex mutex_;
+	std::map<Key, double> deadlines_;
 };
 
 } // namespace ebot
