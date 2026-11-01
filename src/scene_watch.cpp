@@ -7,6 +7,9 @@
 #include <cstdint>
 #include <map>
 #include <mutex>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace ebot {
 
@@ -42,13 +45,20 @@ static ItemState read_state(obs_sceneitem_t *item)
 	return state;
 }
 
-static std::mutex g_mutex; // g_bound, g_items
-static obs_weak_source_t *g_bound = nullptr;
-static std::map<int64_t, ItemState> g_items; // id елемента → останній відомий стан
+// id елемента унікальний лише в межах своєї сцени чи групи — ключ з обох.
+using ItemKey = std::pair<const void *, int64_t>;
+
+static std::mutex g_mutex; // g_watched, g_scene, g_items
+// Програмна сцена (перша) і групи в ній: правку всередині групи OBS шле
+// сигналом самої групи, а не батьківської сцени — камеру часто групують з рамкою.
+static std::vector<obs_weak_source_t *> g_watched;
+static std::string g_scene; // назва програмної сцени — у пуші й для правок у групах
+static std::map<ItemKey, ItemState> g_items; // останній відомий стан елемента
 static Debouncer g_debounce;
 
-// ponytail: лише елементи верхнього рівня сцени — камеру всередині групи посунули,
-// а пушу нема (групу цілком — є). Підписка на кожну групу сцени, якщо знадобиться.
+// ponytail: групи — ті, що були в сцені на момент підв'язки; щойно створена
+// група почне пушити після наступної зміни сцени (саме створення — пушить).
+// Елементи вкладеної сцени-джерела — лише коли та сцена сама стане програмною.
 // Потік відео OBS, під м'ютексом сцени: нічого, що бере його знову (enum_items).
 static void on_item_transform(void *, calldata_t *cd)
 {
@@ -57,24 +67,33 @@ static void on_item_transform(void *, calldata_t *cd)
 	if (!scene || !item)
 		return;
 	ItemState state = read_state(item);
+	std::string scene_name;
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
-		auto [known, added] = g_items.try_emplace(obs_sceneitem_get_id(item), state);
+		auto [known, added] = g_items.try_emplace(ItemKey{scene, obs_sceneitem_get_id(item)}, state);
 		if (!added) {
 			if (same(known->second, state))
 				return;
 			known->second = state;
 		}
+		scene_name = g_scene;
 	}
-	const char *scene_name = obs_source_get_name(obs_scene_get_source(scene));
 	const char *source_name = obs_source_get_name(obs_sceneitem_get_source(item));
-	if (scene_name && source_name && *source_name)
+	if (!scene_name.empty() && source_name && *source_name)
 		g_debounce.touch({scene_name, source_name}, now_sec());
 }
 
-static bool remember_item(obs_scene_t *, obs_sceneitem_t *item, void *param)
+struct Snapshot {
+	std::map<ItemKey, ItemState> items;
+	std::vector<OBSSource> groups;
+};
+
+static bool remember_item(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
 {
-	(*static_cast<std::map<int64_t, ItemState> *>(param))[obs_sceneitem_get_id(item)] = read_state(item);
+	auto *snap = static_cast<Snapshot *>(param);
+	snap->items[ItemKey{scene, obs_sceneitem_get_id(item)}] = read_state(item);
+	if (obs_sceneitem_is_group(item)) // груп у групах OBS не буває
+		snap->groups.emplace_back(obs_sceneitem_get_source(item));
 	return true;
 }
 
@@ -93,21 +112,21 @@ void scene_watch_start()
 
 void scene_watch_unbind()
 {
-	obs_weak_source_t *bound = nullptr;
+	std::vector<obs_weak_source_t *> watched;
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
-		bound = g_bound;
-		g_bound = nullptr;
+		watched.swap(g_watched);
 		g_items.clear();
+		g_scene.clear();
 	}
-	if (!bound)
-		return;
 	// Без g_mutex: відписка чекає на обробник сигналу, а той бере g_mutex.
-	OBSSourceAutoRelease source = obs_weak_source_get_source(bound);
-	if (source)
-		signal_handler_disconnect(obs_source_get_signal_handler(source), "item_transform", on_item_transform,
-					  nullptr);
-	obs_weak_source_release(bound);
+	for (obs_weak_source_t *weak : watched) {
+		OBSSourceAutoRelease source = obs_weak_source_get_source(weak);
+		if (source)
+			signal_handler_disconnect(obs_source_get_signal_handler(source), "item_transform",
+						  on_item_transform, nullptr);
+		obs_weak_source_release(weak);
+	}
 }
 
 // UI-потік (події фронтенду). Стан елементів знімаємо до підписки і без g_mutex:
@@ -115,21 +134,36 @@ void scene_watch_unbind()
 void scene_watch_bind()
 {
 	OBSSourceAutoRelease current = obs_frontend_get_current_scene();
+	const char *name = current ? obs_source_get_name(current) : nullptr;
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
-		if (current && g_bound && obs_weak_source_references_source(g_bound, current))
+		if (current && !g_watched.empty() && obs_weak_source_references_source(g_watched[0], current)) {
+			g_scene = name ? name : ""; // та сама сцена, але її могли перейменувати
 			return;
+		}
 	}
 	scene_watch_unbind();
 	obs_scene_t *scene = current ? obs_scene_from_source(current) : nullptr;
 	if (!scene)
 		return;
-	std::map<int64_t, ItemState> items;
-	obs_scene_enum_items(scene, remember_item, &items);
-	signal_handler_connect(obs_source_get_signal_handler(current), "item_transform", on_item_transform, nullptr);
+	Snapshot snap;
+	obs_scene_enum_items(scene, remember_item, &snap);
+	std::vector<OBSSource> groups = std::move(snap.groups);
+	std::vector<obs_source_t *> sources{current};
+	for (OBSSource &group : groups) {
+		obs_scene_enum_items(obs_group_or_scene_from_source(group), remember_item, &snap);
+		sources.push_back(group);
+	}
+	std::vector<obs_weak_source_t *> watched;
+	for (obs_source_t *source : sources) {
+		signal_handler_connect(obs_source_get_signal_handler(source), "item_transform", on_item_transform,
+				       nullptr);
+		watched.push_back(obs_source_get_weak_source(source));
+	}
 	std::lock_guard<std::mutex> lock(g_mutex);
-	g_items = std::move(items);
-	g_bound = obs_source_get_weak_source(current);
+	g_items = std::move(snap.items);
+	g_watched = std::move(watched);
+	g_scene = name ? name : "";
 }
 
 void scene_watch_stop()
