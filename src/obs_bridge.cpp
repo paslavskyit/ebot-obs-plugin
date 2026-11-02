@@ -5,6 +5,7 @@
 #include "http.hpp"
 #include "obs-websocket-api.h"
 #include "relay_client.hpp"
+#include "webcam_mask.hpp"
 #include <obs.hpp>
 #include <obs-frontend-api.h>
 #include <plugin-support.h>
@@ -164,9 +165,32 @@ static MicPeaks g_peaks;
 static std::mutex g_meters_mutex;
 static std::map<std::string, Meter> g_meters;
 
+// Рівень мікрофона пушем (0.5): вхід, який назвав сервер командою
+// set_mic_level_push; "" — вимкнено (за замовчуванням і після кожного
+// підключення — сервер не знає, що пуш лишився ввімкненим з минулого разу).
+static std::mutex g_push_mutex;
+static std::string g_push_input;
+static MicLevelThrottle g_push_throttle;
+
+static void push_mic_level(const std::string &input, double now, double peak_db)
+{
+	{
+		std::lock_guard<std::mutex> lock(g_push_mutex);
+		if (input != g_push_input)
+			return;
+	}
+	double level = g_push_throttle.feed(now, peak_db);
+	if (level >= 0)
+		relay().push(mic_level_frame(level));
+}
+
+// Пік — після фейдера й мюту: вимкнений мікрофон дає тишу й у пуші рівня.
 static void meter_cb(void *param, const float *, const float *peak, const float *)
 {
-	g_peaks.add(*static_cast<std::string *>(param), now_sec(), peak_to_db(peak, MAX_AUDIO_CHANNELS));
+	const std::string &input = *static_cast<std::string *>(param);
+	double now = now_sec(), peak_db = peak_to_db(peak, MAX_AUDIO_CHANNELS);
+	g_peaks.add(input, now, peak_db);
+	push_mic_level(input, now, peak_db);
 }
 
 static void on_source_gone(void *data, calldata_t *);
@@ -229,14 +253,17 @@ static void on_source_mute(void *, calldata_t *cd)
 
 // Перший get_mic_level для входу вмикає лічильник; до нього seen_samples == 0,
 // і сервер не читає це як тишу (так само поводиться старий релей).
-static void ensure_meter(const std::string &name)
+// false — такого входу в OBS нема.
+static bool ensure_meter(const std::string &name)
 {
 	std::lock_guard<std::mutex> lock(g_meters_mutex);
-	if (name.empty() || g_meters.count(name))
-		return;
+	if (name.empty())
+		return false;
+	if (g_meters.count(name))
+		return true;
 	OBSSourceAutoRelease source = obs_get_source_by_name(name.c_str());
 	if (!source)
-		return;
+		return false;
 	Meter m;
 	m.meter = obs_volmeter_create(OBS_FADER_LOG);
 	m.weak = obs_source_get_weak_source(source);
@@ -248,6 +275,23 @@ static void ensure_meter(const std::string &name)
 		signal_handler_connect(sh, signal, on_source_gone, m.name);
 	signal_handler_connect(sh, "mute", on_source_mute, m.name);
 	g_meters[name] = m;
+	return true;
+}
+
+// Сервер вмикає пуш для мікрофона, якого резолвить сам (obs_devices: ручний
+// вибір стримера важливіший за автодетект) — плагін вгадувати не береться.
+static std::string set_mic_level_push(obs_data_t *params)
+{
+	bool enabled = obs_data_get_bool(params, "enabled");
+	std::string input = enabled ? obs_data_get_string(params, "input") : "";
+	if (enabled && !ensure_meter(input))
+		throw std::runtime_error("No source was found by the name of `" + input + "`");
+	{
+		std::lock_guard<std::mutex> lock(g_push_mutex);
+		g_push_input = input;
+	}
+	g_push_throttle.reset();
+	return success();
 }
 
 static std::string get_mic_level(obs_data_t *params)
@@ -325,20 +369,51 @@ std::string dispatch(const std::string &method, obs_data_t *params)
 		return obs_call(params);
 	if (method == "get_mic_level")
 		return get_mic_level(params);
+	if (method == "set_mic_level_push")
+		return set_mic_level_push(params);
+	if (method == "set_webcam_mask")
+		return set_webcam_mask(params);
 	throw std::runtime_error("Unknown method: " + method);
 }
 
-void bridge_shutdown()
+void bridge_shutdown(bool keep_push_meter)
 {
+	std::string push;
+	if (keep_push_meter) {
+		std::lock_guard<std::mutex> lock(g_push_mutex);
+		push = g_push_input;
+	}
 	std::vector<Meter> meters;
 	{
 		std::lock_guard<std::mutex> lock(g_meters_mutex);
-		for (auto &[name, m] : g_meters)
-			meters.push_back(m);
-		g_meters.clear();
+		for (auto it = g_meters.begin(); it != g_meters.end();) {
+			if (!push.empty() && it->first == push) {
+				++it;
+				continue;
+			}
+			meters.push_back(it->second);
+			it = g_meters.erase(it);
+		}
 	}
 	for (Meter &m : meters)
 		free_meter(m);
+}
+
+void bridge_resume_push()
+{
+	std::string push;
+	{
+		std::lock_guard<std::mutex> lock(g_push_mutex);
+		push = g_push_input;
+	}
+	if (!push.empty() && !ensure_meter(push))
+		obs_log(LOG_INFO, "mic level push: input is gone after the scene collection change");
+}
+
+void mic_push_stop()
+{
+	std::lock_guard<std::mutex> lock(g_push_mutex);
+	g_push_input.clear();
 }
 
 std::string outputs_frame()

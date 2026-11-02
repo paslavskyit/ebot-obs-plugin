@@ -188,6 +188,84 @@ double peak_to_db(const float *peaks, int channels)
 	return best;
 }
 
+int clamp_mask_px(double value)
+{
+	if (!(value > 0)) // і NaN
+		return 0;
+	if (value >= WEBCAM_MASK_MAX_PX)
+		return WEBCAM_MASK_MAX_PX;
+	return int(std::lround(value));
+}
+
+double mic_level_from_db(double peak_db)
+{
+	if (!(peak_db > MIC_LEVEL_FLOOR_DB)) // і NaN, і -inf (тиша, вимкнений мікрофон)
+		return 0.0;
+	double level = std::min(1.0, (peak_db - MIC_LEVEL_FLOOR_DB) / -MIC_LEVEL_FLOOR_DB);
+	return std::round(level * 100.0) / 100.0;
+}
+
+std::string mic_level_frame(double level)
+{
+	long hundredths = std::lround(std::clamp(level, 0.0, 1.0) * 100.0);
+	std::string cents = std::to_string(hundredths % 100);
+	return "{\"type\":\"mic_level\",\"level\":" + std::to_string(hundredths / 100) + "." +
+	       (cents.size() < 2 ? "0" : "") + cents + "}";
+}
+
+double MicLevelThrottle::feed(double now, double peak_db)
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	if (window_start_ < 0)
+		window_start_ = now;
+	max_db_ = std::max(max_db_, peak_db);
+	// 1e-6: 10.1 - 10.0 у double — трохи менше за 0.1
+	if (now - window_start_ < MIC_LEVEL_PUSH_INTERVAL_SEC - 1e-6)
+		return -1.0;
+	double level = mic_level_from_db(max_db_);
+	window_start_ = now;
+	max_db_ = MIC_PEAK_FLOOR_DB;
+	if (level == last_sent_)
+		return -1.0;
+	last_sent_ = level;
+	return level;
+}
+
+void MicLevelThrottle::reset()
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	window_start_ = -1.0;
+	max_db_ = MIC_PEAK_FLOOR_DB;
+	last_sent_ = -1.0;
+}
+
+void Debouncer::touch(const Key &key, double now)
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	deadlines_[key] = now + ITEM_TRANSFORM_DEBOUNCE_SEC;
+}
+
+std::vector<Debouncer::Key> Debouncer::due(double now)
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	std::vector<Key> ready;
+	for (auto it = deadlines_.begin(); it != deadlines_.end();) {
+		if (it->second <= now) {
+			ready.push_back(it->first);
+			it = deadlines_.erase(it);
+		} else {
+			++it;
+		}
+	}
+	return ready;
+}
+
+void Debouncer::clear()
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	deadlines_.clear();
+}
+
 CloseKind classify_close(unsigned short code)
 {
 	if (code == RELAY_CLOSE_REJECTED)

@@ -217,7 +217,9 @@ CloseKind RelayClient::serve(WsConnection &ws)
 	obs_log(LOG_INFO, "connected to eBot");
 	std::thread writer_thread([this, &ws] { writer(ws); });
 	// Ресинк стану на кожне (пере)підключення: сервер міг перезапуститись і
-	// не знати ні сцени, ні того, чи йде стрім.
+	// не знати ні сцени, ні того, чи йде стрім. Пуш рівня мікрофона — навпаки,
+	// з нуля: його вмикає сервер, і після деплою він не знає, що той ішов.
+	mic_push_stop();
 	push_scene(current_scene_name());
 	push(outputs_frame());
 
