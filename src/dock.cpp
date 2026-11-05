@@ -120,40 +120,51 @@ static void show_note(const QString &text, bool rich = false)
 	g_note->setVisible(!text.isEmpty());
 }
 
-// Браузер — лише після FINISHED_LOADING: CEF піднімає obs-browser, і чекати на
-// нього в post_load означало б затримати старт OBS.
-static bool ensure_browser()
+// CEF — лише після FINISHED_LOADING: його піднімає obs-browser, і чекати на нього
+// в post_load означало б затримати старт OBS.
+static bool ensure_cef()
 {
-	if (g_browser)
+	if (g_cef)
 		return true;
 	if (!g_frontend_ready || !g_root || !g_layout || g_no_browser)
 		return false;
-	if (!g_cef) {
-		g_cef = obs_browser_init_panel();
-		// closeBrowser (його кличе вихід) з'явився у версії 2 — як у BrowserDock самого OBS.
-		if (!g_cef || obs_browser_qcef_version() < 2) {
-			g_cef = nullptr;
-			g_no_browser = true;
-			show_note(t("Dock.NoBrowser"));
-			obs_log(LOG_WARNING, "obs-browser is unavailable: the dock stays without the control panel");
-			return false;
-		}
-		g_cef->init_browser();
-		g_cef->wait_for_browser_init();
-		// Своє сховище cookies: сесія пульта не змішується з іншими браузерними
-		// доками й не чіпає вхід у кабінет у звичайному браузері.
-		g_cookies = g_cef->create_cookie_manager("ebot_dock", true);
+	g_cef = obs_browser_init_panel();
+	// closeBrowser (його кличе вихід) з'явився у версії 2 — як у BrowserDock самого OBS.
+	if (!g_cef || obs_browser_qcef_version() < 2) {
+		g_cef = nullptr;
+		g_no_browser = true;
+		show_note(t("Dock.NoBrowser"));
+		obs_log(LOG_WARNING, "obs-browser is unavailable: the dock stays without the control panel");
+		return false;
 	}
-	g_browser = g_cef->create_widget(g_root, "about:blank", g_cookies);
-	g_layout->addWidget(g_browser, 1);
+	g_cef->init_browser();
+	g_cef->wait_for_browser_init();
+	// Своє сховище cookies: сесія пульта не змішується з іншими браузерними
+	// доками й не чіпає вхід у кабінет у звичайному браузері.
+	g_cookies = g_cef->create_cookie_manager("ebot_dock", true);
 	return true;
+}
+
+// Перша адреса йде в create_widget, а не в setURL: QCefWidget::setURL лише
+// запам'ятовує її, поки CreateBrowserSync не повернувся, і браузер лишається на
+// тій адресі, з якою створювався. На старті OBS CEF зайнятий джерелами, код
+// приходив раніше, і док стояв сірим на about:blank до ручного «Оновити»
+// (04.11.2026: handoff без enter у логах сервера).
+static void open_url(const std::string &url)
+{
+	if (g_browser) {
+		g_browser->setURL(url);
+		return;
+	}
+	g_browser = g_cef->create_widget(g_root, url, g_cookies);
+	g_layout->addWidget(g_browser, 1);
 }
 
 // Кожне відкриття — новий одноразовий код: сервер не пускає код двічі.
 // manual — кнопка «Оновити пульт» чи нова тема: паузи автоповтору з нуля.
 static void load_panel(bool manual = true)
 {
-	if (!ensure_browser())
+	if (!ensure_cef())
 		return;
 	int gen = ++g_load_gen;
 	DockTheme theme = current_theme(); // палітра — лише з UI-потоку
@@ -168,7 +179,7 @@ static void load_panel(bool manual = true)
 		QMetaObject::invokeMethod(
 			QCoreApplication::instance(),
 			[gen, theme, code, status] {
-				if (gen != g_load_gen || !g_browser)
+				if (gen != g_load_gen || !g_cef || !g_root || !g_layout)
 					return;
 				if (code.empty()) {
 					// Повтор — з паузою 5 → 60 с, а після 429 лише вручну:
@@ -188,7 +199,7 @@ static void load_panel(bool manual = true)
 				}
 				g_retry_attempt = 0;
 				show_note("");
-				g_browser->setURL(server_base() + dock_enter_path(code, theme));
+				open_url(server_base() + dock_enter_path(code, theme));
 			},
 			Qt::QueuedConnection);
 	}).detach();
@@ -369,9 +380,12 @@ void create_dock()
 		update->setText(QString("<a href=\"%1\">%2</a>").arg(url.toHtmlEscaped(), t("Update.Available")));
 
 		bool retry_due = g_load_failed && g_retry_at && QDateTime::currentMSecsSinceEpoch() >= g_retry_at;
-		if (linked && g_frontend_ready && !g_loaded)
+		// Схований док (вкладка позаду іншої) браузера не створить, а код живе 60 с:
+		// відкриваємо, коли док на екрані, інакше сторінка отримала б прострочений код.
+		bool on_screen = root->isVisible();
+		if (linked && g_frontend_ready && !g_loaded && on_screen)
 			load_panel();
-		else if (linked && retry_due && state == LinkState::Connected)
+		else if (linked && retry_due && state == LinkState::Connected && on_screen)
 			load_panel(false);
 		else if (!linked && g_loaded)
 			unload_panel();
